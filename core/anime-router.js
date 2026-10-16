@@ -1753,6 +1753,9 @@ export async function handleAnimeApi(req, res) {
       const data = await Promise.race([fetchMovieboxHome(), movieboxCap(undefined, "catalog")]);
       movieboxHomeStale.data = data;
       movieboxHomeStale.at = Date.now();
+      // Durable copy: workers.dev runs many isolates, and a per-isolate
+      // stale copy cannot help a cold one — D1 can.
+      writeDoc("moviebox-home-stale", { at: movieboxHomeStale.at, data }).catch(() => {});
       res.statusCode = 200;
       return res.end(JSON.stringify({ success: true, ...data }));
     } catch (e) {
@@ -1765,6 +1768,20 @@ export async function handleAnimeApi(req, res) {
           staleAgeMs: Date.now() - movieboxHomeStale.at,
         }));
       }
+      try {
+        const durable = await readDoc("moviebox-home-stale", null);
+        if (durable && durable.data) {
+          movieboxHomeStale.data = durable.data;
+          movieboxHomeStale.at = durable.at || 0;
+          res.statusCode = 200;
+          return res.end(JSON.stringify({
+            success: true,
+            ...durable.data,
+            stale: true,
+            staleAgeMs: Date.now() - (durable.at || 0),
+          }));
+        }
+      } catch {}
       return movieboxFail(e, "Catalog");
     }
   }
@@ -1780,6 +1797,7 @@ export async function handleAnimeApi(req, res) {
         const oldest = movieboxListStale.keys().next().value;
         if (oldest !== undefined) movieboxListStale.delete(oldest);
       }
+      writeDoc(`moviebox-list-${tab}-${page}`, { at: Date.now(), items }).catch(() => {});
       res.statusCode = 200;
       return res.end(JSON.stringify({ success: true, tab, page, items }));
     } catch (e) {
@@ -1788,6 +1806,14 @@ export async function handleAnimeApi(req, res) {
         res.statusCode = 200;
         return res.end(JSON.stringify({ success: true, tab, page, items: hit, stale: true }));
       }
+      try {
+        const durable = await readDoc(`moviebox-list-${tab}-${page}`, null);
+        if (durable && durable.items) {
+          movieboxListStale.set(listKey, durable.items);
+          res.statusCode = 200;
+          return res.end(JSON.stringify({ success: true, tab, page, items: durable.items, stale: true }));
+        }
+      } catch {}
       return movieboxFail(e, "Catalog list");
     }
   }
@@ -1809,6 +1835,7 @@ export async function handleAnimeApi(req, res) {
         const oldest = movieboxSearchStale.keys().next().value;
         if (oldest !== undefined) movieboxSearchStale.delete(oldest);
       }
+      writeDoc("moviebox-search-last", { q: queryKey, at: Date.now(), items }).catch(() => {});
       res.statusCode = 200;
       return res.end(JSON.stringify({ success: true, query: q, items }));
     } catch (e) {
@@ -1817,6 +1844,14 @@ export async function handleAnimeApi(req, res) {
         res.statusCode = 200;
         return res.end(JSON.stringify({ success: true, query: q, items: hit, stale: true }));
       }
+      try {
+        const durable = await readDoc("moviebox-search-last", null);
+        if (durable && durable.q === queryKey && durable.items) {
+          movieboxSearchStale.set(queryKey, durable.items);
+          res.statusCode = 200;
+          return res.end(JSON.stringify({ success: true, query: q, items: durable.items, stale: true }));
+        }
+      } catch {}
       return movieboxFail(e, "Search");
     }
   }
