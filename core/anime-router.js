@@ -1573,6 +1573,33 @@ export async function handleAnimeApi(req, res) {
         }
       }
 
+      // Third net: ToonStream, a separate episode-wise Hindi source that keeps
+      // answering when goku removed a post and MovieBox has no copy (its
+      // upstream also rate-limits in waves). Only used when the id names a
+      // real episode — season-pack ids carry no episode number, and guessing
+      // one would play the wrong episode.
+      if (!wantsGokuMovie) {
+        const epInName = /(?:episode|ep)[\s-]*(\d{1,3})/i.exec(requestedId);
+        if (epInName) {
+          const toon = await findToonstreamForGoku(gokuSlug).catch(() => null);
+          if (toon?.slug) {
+            const pick = await fetchBestToonstreamServer(toon.slug, gokuSeason || 1, Number(epInName[1])).catch(() => null);
+            if (pick?.primary) {
+              res.statusCode = 200;
+              return res.end(JSON.stringify({
+                success: true,
+                type: "episode",
+                title: toon.title,
+                season: gokuSeason || 1,
+                episode: Number(epInName[1]),
+                stream: pick.primary.embedUrl,
+                streams: [{ url: "", embedUrl: pick.primary.embedUrl, server: "Mirror", type: "embed" }],
+              }));
+            }
+          }
+        }
+      }
+
       return indiaFail(new Error("404 not found"), "These stream links");
     }
 
