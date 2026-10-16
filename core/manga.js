@@ -1121,7 +1121,10 @@ export async function proxyMangaImage(imageUrl) {
     headers: {
       "User-Agent": UA,
       Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-      Referer: `${SITE}/`,
+      // MangaDex's CDN answers a foreign (mangakakalot) Referer with its
+      // "You can read this at MANGADEX" placeholder image — every cover on
+      // /manga came back as that same JPEG. Send each host its own Referer.
+      Referer: /mangadex/i.test(host) ? "https://mangadex.org/" : `${SITE}/`,
     },
     redirect: "follow",
     signal: AbortSignal.timeout(20000),
