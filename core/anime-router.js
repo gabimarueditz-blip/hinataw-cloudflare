@@ -1388,13 +1388,35 @@ export async function handleAnimeApi(req, res) {
     // gokuhd series carry their seasons inside the post itself.
     if (seriesID.startsWith("goku:")) {
       const detail = await fetchHindiDetail(seriesID).catch(() => null);
-      if (!detail) return indiaFail(new Error("404 not found"), "This title");
       // Episode-wise seasons come first: the UI opens the first season, and a
       // whole-season pack cannot offer anything past episode 1.
       const [movieboxSeasons, toonSeasons] = await Promise.all([
         getRealEpisodeSeasons(seriesID).catch(() => []),
         getToonstreamSeasons(seriesID).catch(() => []),
       ]);
+      if (!detail) {
+        // gokuhd removed the post, but the bridges match by TITLE, so the
+        // same show can still be listed (and played) from MovieBox or
+        // ToonStream. Only fail when both bridges come back empty too.
+        const covered = new Set(movieboxSeasons.map((s) => String(s.seasonNumber)));
+        const extraSeasons = toonSeasons.filter((s) => !covered.has(String(s.seasonNumber)));
+        const seasons = [...movieboxSeasons, ...extraSeasons];
+        if (seasons.length) {
+          res.statusCode = 200;
+          return res.end(JSON.stringify({
+            success: true,
+            source: "bridge",
+            series: [{
+              seriesId: seriesID,
+              title: seriesID.slice(5).replace(/-/g, " "),
+              poster: "",
+              type: "series",
+            }],
+            seasons,
+          }));
+        }
+        return indiaFail(new Error("404 not found"), "This title");
+      }
       // Both episode-wise sources usually cover the same season numbers. MovieBox
       // leads because its episodes are direct MP4 files that start on their own,
       // while ToonStream's are click-to-play embed pages; where MovieBox covers a
@@ -1471,7 +1493,18 @@ export async function handleAnimeApi(req, res) {
       const [slug, seasonPart] = seasonId.slice(5).split("~");
       const seasonNum = /^S(\d{1,2})$/i.exec(seasonPart || "")?.[1] || null;
       const data = await fetchHindiEpisodes(slug, seasonNum).catch(() => null);
-      if (!data) return indiaFail(new Error("404 not found"), "These episodes");
+      if (!data || !(data.episodes || []).length) {
+        // Dead/rotted post: bridge to the same show's episode-wise sources.
+        // MovieBox leads (direct MP4s); ToonStream covers what it doesn't.
+        const mbox = await getRealEpisodeSeasons(slug).catch(() => []);
+        const toon = mbox.length ? [] : await getToonstreamSeasons(slug).catch(() => []);
+        const bridged = mbox.length ? mbox : toon;
+        if (bridged.length) {
+          res.statusCode = 200;
+          return res.end(JSON.stringify({ success: true, seasonId, bridged: true, seasons: bridged, episodes: [] }));
+        }
+        return indiaFail(new Error("404 not found"), "These episodes");
+      }
       res.statusCode = 200;
       return res.end(JSON.stringify({
         success: true,
