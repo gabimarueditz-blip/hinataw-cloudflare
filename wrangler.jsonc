@@ -1,0 +1,9 @@
+// Cloudflare Workers entry for Git-integrated builds (Workers Builds / CI).
+// The deployable bundle freebuff/dist/worker.js is committed, so a connected
+// repo deploys as-is with NO build command. To rebuild the bundle after code
+// changes run: npm run build:worker
+{
+  "name": "hinataw",
+  "main": "freebuff/dist/worker.js",
+  "compatibility_date": "2026-10-01"
+}

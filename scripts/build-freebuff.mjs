@@ -11,11 +11,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const require = createRequire("D:/hinataw-tools/package.json");
-const esbuild = require("esbuild");
+// esbuild must resolve from the project itself so this script also works on
+// CI (Cloudflare Workers Builds runs on Linux, where the old D:/hinataw-tools
+// path of the original dev machine cannot exist).
+const require = createRequire(import.meta.url);
+let esbuild;
+try {
+  esbuild = require("esbuild");
+} catch {
+  try {
+    // Legacy fallback for the original Windows dev machine.
+    esbuild = createRequire("D:/hinataw-tools/package.json")("esbuild");
+  } catch {
+    console.error("[build] esbuild not found — run `npm install` first (it is a devDependency)");
+    process.exit(1);
+  }
+}
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const toolsModules = "D:/hinataw-tools/node_modules";
 
 // --- 1. preloaded.js -------------------------------------------------------
 const PRELOAD_KEYS = ["hianime-cache", "users", "feedback"]; // NOT notices
@@ -55,7 +68,6 @@ const result = await esbuild.build({
   charset: "utf8",
   logLevel: "warning",
   legalComments: "none",
-  nodePaths: [toolsModules],
   inject: [shim("buffer-inject.js")],
   alias: {
     fs: shim("fs.js"),
