@@ -6133,27 +6133,6 @@
       </section>
 
       <!-- SECTION: HINDI SERIES -->
-      <section class="trending-carousel-section" id="hindiSeriesCarouselSection">
-        <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="hindiSeriesCarouselHeading">Hindi Series</h2>
-        </div>
-        <div class="hianime-trending-wrap">
-          <div class="trending-carousel-viewport" id="hindiSeriesCarouselViewport">
-            <div class="trending-carousel-track" id="hindiSeriesCarouselTrack"></div>
-          </div>
-          <div class="hianime-carousel-arrows">
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('hindi-series', 'prev')" aria-label="Previous slide" title="Previous slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div class="carousel-dots-wrap" id="hindiSeriesCarouselDotsWrap"></div>
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('hindi-series', 'next')" aria-label="Next slide" title="Next slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-            <span class="carousel-section-counter" id="hindiSeriesCarouselCounter"></span>
-          </div>
-        </div>
-      </section>
-
       <!-- SECTION: HINDI MOVIES -->
       <section class="trending-carousel-section" id="hindiMoviesCarouselSection">
         <div class="hianime-trending-header">
@@ -7823,6 +7802,126 @@
       updateCarouselHeading('trending', document.getElementById('carouselHeading').textContent.trim());
     }
 
+    // ==========================================
+    // CONTINUE WATCHING (the first row)
+    //
+    // The old Trending row is repurposed: it now shows the most recent titles
+    // the user opened, newest first, from a local history. With no history the
+    // row hides itself — an empty carousel row is worse than none.
+    // ==========================================
+    const CW_STORE_KEY = 'hinataw-continue-watching-v1';
+    function cwList() {
+      try {
+        const l = JSON.parse(localStorage.getItem(CW_STORE_KEY) || '[]');
+        return Array.isArray(l) ? l : [];
+      } catch (e) { return []; }
+    }
+    function cwSave(list) {
+      try { localStorage.setItem(CW_STORE_KEY, JSON.stringify(list.slice(0, 24))); } catch (e) {}
+    }
+    function cwTrack(entry) {
+      if (!entry || !(entry.slug || entry.id)) return;
+      const keyOf = (x) => (x.kind || '') + ':' + (x.slug || x.id || '');
+      const next = cwList().filter((x) => keyOf(x) !== keyOf(entry));
+      next.unshift({
+        kind: entry.kind || '',
+        slug: entry.slug || '',
+        id: entry.id || '',
+        type: entry.type || 'series',
+        title: entry.title || '',
+        poster: entry.poster || '',
+        ts: Date.now(),
+      });
+      cwSave(next);
+      // Live update when the first row is on screen.
+      if (document.getElementById('trendingCarouselSection') &&
+          document.getElementById('trendingCarouselSection').style.display !== 'none' &&
+          document.getElementById('carouselHeading') &&
+          document.getElementById('carouselHeading').textContent.trim() === 'Continue Watching') {
+        renderContinueWatching();
+      }
+    }
+    function cwResume(index) {
+      const x = cwList()[index];
+      if (!x) return;
+      try {
+        if (x.kind === 'india') return openIndiaDetail(x.slug, x.type, x.title);
+        if (x.kind === 'moviebox') return openMovieboxDetail(x.slug, x.type, x.title);
+        if (x.id) return openPlayerById(x.id);
+      } catch (e) {}
+    }
+    function cwCardHtml(x, index) {
+      const poster = x.poster
+        ? `<img class="slide-poster-img" src="${escapeHtml(x.poster)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(x.title)}" loading="lazy"/>`
+        : `<div class="slide-poster-img" style="width:100%;height:100%;background:linear-gradient(135deg,#241a2e,#141021);"></div>`;
+      const ago = (() => {
+        if (!x.ts) return '';
+        const d = (Date.now() - x.ts) / 86400000;
+        if (d < 1) return 'Today';
+        if (d < 2) return 'Yesterday';
+        return Math.round(d) + 'd ago';
+      })();
+      return `
+        <div class="category-slide-card" onclick="cwResume(${index})" data-title="${escapeHtml(x.title)}">
+          <div class="slide-poster-wrap">
+            ${poster}
+            <div class="slide-overlay"></div>
+            <div class="slide-play-action">
+              <button class="slide-play-btn" type="button">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="slide-content-wrap">
+            <div class="slide-title-group">
+              <div class="slide-anime-title" title="${escapeHtml(x.title)}">${escapeHtml(x.title)}</div>
+            </div>
+            <div class="slide-tags-row">
+              ${ago ? `<span class="slide-tag">${escapeHtml(ago)}</span>` : ''}
+              <span class="slide-tag">${x.type === 'movie' ? 'Movie' : 'Series'}</span>
+            </div>
+          </div>
+        </div>`;
+    }
+    function renderContinueWatching() {
+      const section = document.getElementById('trendingCarouselSection');
+      const track = document.getElementById('trendingCarouselTrack');
+      const heading = document.getElementById('carouselHeading');
+      if (!section || !track) return;
+      const list = cwList();
+      if (!list.length) {
+        section.style.display = 'none';
+        return;
+      }
+      section.style.display = '';
+      if (heading) heading.textContent = 'Continue Watching';
+      track.innerHTML = list.map((x, i) => cwCardHtml(x, i)).join('');
+    }
+    // History hook: one capture-phase listener reads the card's onclick so
+    // every content path (india, moviebox, plain player id) is recorded
+    // without touching each handler.
+    document.addEventListener('click', (ev) => {
+      const t = ev && ev.target;
+      if (!t || !t.closest) return;
+      const card = t.closest('.category-slide-card');
+      if (!card) return;
+      const oc = card.getAttribute('onclick') || '';
+      const title = card.getAttribute('data-title') || '';
+      const img = card.querySelector('img');
+      const poster = img ? (img.getAttribute('src') || '') : '';
+      let m = /^openIndiaDetail\('([^']*)',\s*'([^']*)'/.exec(oc);
+      if (m) return cwTrack({ kind: 'india', slug: m[1], type: m[2], title, poster });
+      m = /^openMovieboxDetail\('([^']*)',\s*'([^']*)'/.exec(oc);
+      if (m) return cwTrack({ kind: 'moviebox', slug: m[1], type: m[2], title, poster });
+      if (/^openPlayerById\(/.test(oc)) {
+        let pid = '';
+        try { pid = JSON.parse(oc.slice('openPlayerById('.length, -1)); } catch (e) {}
+        if (pid) cwTrack({ kind: 'player', id: String(pid), title, poster });
+      }
+    }, true);
+    // Repurpose the row: history -> Continue Watching, no history -> hidden.
+    initTrendingCarousel = function () { renderContinueWatching(); };
+
     function renderTrendingCarousel() {
       const track = document.getElementById('trendingCarouselTrack');
       if (!track) return;
@@ -8486,9 +8585,7 @@ let heroSwapTimer = null;
       // stay for browse/watchlist views that target .hianime-latest-grid.
       renderHindiCards(seriesList, 'hindiSeriesGrid');
       renderHindiCards(moviesList, 'hindiMoviesGrid');
-      initCategoryCarousel('hindi-series', seriesList);
       initCategoryCarousel('hindi-movies', moviesList);
-      updateCarouselHeading('hindi-series', 'Hindi Series');
       updateCarouselHeading('hindi-movies', 'Hindi Movies');
     }
 

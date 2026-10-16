@@ -474,8 +474,12 @@ async function getHindiMoviesLibrary() {
     items.push(it);
   };
 
-  // Add animahd (India) movies first - these are always Hindi
-  (india && india.items ? india.items : []).forEach((it) => push(it, "animahd"));
+  // Add animahd (India) movies first - these are always Hindi.
+  // The catalog was asked for movies only, so items that arrive without an
+  // explicit type (the goku /movies/ parser marks some as "unknown") are
+  // still movies — coercing keeps the row from going empty when the page
+  // markup drifts.
+  (india && india.items ? india.items : []).forEach((it) => push(it && !it.type ? { ...it, type: "movie" } : it, "animahd"));
   
   // Add cartoon search results - filter to only Hindi/Indian cartoons
   // Cartoon searches return both Hindi and non-Hindi versions.
@@ -518,7 +522,17 @@ async function getHindiMoviesLibrary() {
     }
   }
   
-  hindiMoviesLibraryCache = { at: Date.now(), items };
+  // An empty refresh (both upstreams rate-limiting or rotting) must never
+  // replace a good list or be cached: serve the last non-empty library.
+  if (!items.length && hindiMoviesLibraryCache.items && hindiMoviesLibraryCache.items.length) {
+    return {
+      items: hindiMoviesLibraryCache.items,
+      total: hindiMoviesLibraryCache.items.length,
+      cached: true,
+      stale: true,
+    };
+  }
+  if (items.length) hindiMoviesLibraryCache = { at: Date.now(), items };
   return { items, total: items.length, cached: false };
 }
 
