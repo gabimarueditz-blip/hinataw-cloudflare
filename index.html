@@ -7701,16 +7701,13 @@
         }
       } catch (e) {}
 
-      let mbData = null;
-      try {
-        const mbRes = await fetch('/api/moviebox/home', { cache: 'no-store' });
-        if (mbRes.ok) {
-          const raw = await mbRes.json();
-          if (raw && raw.success) mbData = raw;
-        }
-      } catch (e) {}
-
       hiHomeData = homeData;
+
+      // Phase 1 — paint everything HiAnime drives from /home alone. On a cold
+      // isolate the MovieBox ladder can run for a minute, so nothing here may
+      // wait on it: hero, trending, HiAnime rows and the manga request render
+      // from the /home payload by themselves.
+      let mbData = null;
 
       try {
         // HiAnime stays the primary catalog: it drives the hero spotlight, the
@@ -7738,19 +7735,53 @@
         restartHeroAutoplay();
         initTrendingCarousel(trendingList);
 
-        // HiAnime rows first (they keep their own headings), MovieBox rows and
-        // the full MovieBox library after.
+        // HiAnime rows first (they keep their own headings); MovieBox rows
+        // and the full MovieBox library follow in phase 2 below.
         if (homeData) renderHiAnimeHomeSections(homeData);
-        if (mbData) renderMovieboxHomeSections(mbData);
 
-        // Finally, every title from any category also lands in the Hindi rows.
+        // Every title loaded so far also lands in the Hindi rows.
         buildHindiCategoryRows();
-
-        // Manga rows load on their own schedule: one extra request, and a
-        // failure only hides the two rows instead of breaking the home view.
-        loadMangaSections();
       } catch (err) {
         console.warn('Catalog load failed:', err);
+      }
+
+      // Manga rows load on their own schedule: one extra request, and a
+      // failure only hides the two rows instead of breaking the home view.
+      try { loadMangaSections(); } catch (e) {}
+
+      // Phase 2 — the MovieBox ladder answers whenever it answers (capped at
+      // 9s server-side). It only paints its own rows — plus the catalog/hero
+      // fallbacks when HiAnime was unavailable — and never blocks phase 1.
+      try {
+        const mbRes = await fetch('/api/moviebox/home', { cache: 'no-store' });
+        if (mbRes.ok) {
+          const raw = await mbRes.json();
+          if (raw && raw.success) mbData = raw;
+        }
+      } catch (e) {}
+
+      if (mbData) {
+        try {
+          if (!currentCatalog.length || !currentFeatured.length) {
+            if (Array.isArray(mbData.library) && mbData.library.length) {
+              currentCatalog = mbData.library;
+            }
+            const trendingList = (mbData.trending && mbData.trending.length)
+              ? mbData.trending
+              : currentCatalog.slice(0, 18);
+            currentFeatured = trendingList.slice(0, 8);
+            currentHeroIndex = 0;
+            renderHero(currentFeatured[0]);
+            renderHeroThumbs(currentFeatured);
+            updateHeroDots();
+            restartHeroAutoplay();
+            initTrendingCarousel(trendingList);
+          }
+          renderMovieboxHomeSections(mbData);
+          buildHindiCategoryRows();
+        } catch (err) {
+          console.warn('MovieBox section render failed:', err);
+        }
       }
     }
 

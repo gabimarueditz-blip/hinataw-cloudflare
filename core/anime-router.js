@@ -926,11 +926,15 @@ export async function handleAnimeApi(req, res) {
         new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
       ]);
 
+    // Budgets are tight on purpose: on a cold Cloudflare isolate these same
+    // sources used to wait out 12-16s caps, so the page answered after ~17s and
+    // every first visitor saw empty rows. Warm calls resolve in 1-3s and never
+    // hit the cap; a cold call now answers within ~6s with fallback data.
     const [indiaHome, trendingOngoing, hindiHome, movieboxHome] = await Promise.all([
-      withTimeout(fetchIndiaHome(), 12000, { series: [], movies: [] }),
-      withTimeout(getTrendingOngoing(12), 12000, []),
-      withTimeout(fetchHindiHome(), 14000, { series: [], movies: [] }),
-      withTimeout(fetchMovieboxHome(), 16000, null),
+      withTimeout(fetchIndiaHome(), 5000, { series: [], movies: [] }),
+      withTimeout(getTrendingOngoing(12), 5000, []),
+      withTimeout(fetchHindiHome(), 6000, { series: [], movies: [] }),
+      withTimeout(fetchMovieboxHome(), 6000, null),
     ]);
     const trendingSource = trendingOngoing.length > 0
       ? trendingOngoing
@@ -1624,8 +1628,21 @@ export async function handleAnimeApi(req, res) {
   };
 
   if (pathname === "/api/moviebox/home") {
+    // The MovieBox GET ladder (netfilm 429s -> aoneroom retries -> jina reader
+    // pacing) is unbounded and can run for a minute on a cold isolate; the home
+    // page waits on this response, so fail fast at 9s and let the next (warm)
+    // load pick the catalog up.
+    let capTimer;
     try {
-      const data = await fetchMovieboxHome();
+      const data = await Promise.race([
+        fetchMovieboxHome(),
+        new Promise((_, reject) => {
+          capTimer = setTimeout(
+            () => reject(new Error("MovieBox catalog exceeded 9s (cold isolate)")),
+            9000,
+          );
+        }),
+      ]).finally(() => clearTimeout(capTimer));
       res.statusCode = 200;
       return res.end(JSON.stringify({ success: true, ...data }));
     } catch (e) {
