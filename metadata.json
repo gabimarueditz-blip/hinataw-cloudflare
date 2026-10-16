@@ -1,0 +1,8 @@
+{
+  "name": "AniMoon API",
+  "description": "Unified anime streaming aggregator API providing endpoints for multiple anime sources, streams, and documentation.",
+  "requestFramePermissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

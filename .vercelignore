@@ -1,0 +1,11 @@
+# Never upload files that contain credentials
+deploy_to_github.ps1
+
+# Local-only Vercel state and env
+.vercel
+.env.local
+.vercel-token
+
+# Scratch files from local inspection
+dryrun.json
+dryrun.err

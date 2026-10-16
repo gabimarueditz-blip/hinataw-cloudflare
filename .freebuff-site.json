@@ -1,0 +1,14 @@
+{
+  "siteId": "8806d01e-c131-473c-83fa-f67dd4ad1983",
+  "name": "hinataw",
+  "preview": {
+    "environmentId": "1c65ed47-d424-4558-9376-468ab42549f0",
+    "workerName": "site-1c65ed47d42445589376468ab42549f0",
+    "url": "https://site-1c65ed47d42445589376468ab42549f0.freebuff.page"
+  },
+  "production": {
+    "environmentId": "4c89891a-db56-4e1a-a0b3-1c693bc18c94",
+    "workerName": "site-4c89891adb564e1aa0b31c693bc18c94",
+    "url": "https://site-4c89891adb564e1aa0b31c693bc18c94.freebuff.page"
+  }
+}

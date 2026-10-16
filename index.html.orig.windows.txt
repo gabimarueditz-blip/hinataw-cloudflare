@@ -1,0 +1,7 @@
+cur length 532293
+bundled length 595821
+first diff at 36786
+cur char .
+bundled char /
+cur window "tom: 14px;\n      gap: 12px;\n    }\n    .trending-carousel-section .hianime-trending-header .hianime-heading {\n      margin-bottom: 0;\n    }\n\n    /* per-section carousel arrows (mirrored on the sides of each track) */\n    .trending-carousel-section .hianime-carousel-arrows {\n      display: flex;\n      align-items: center;\n      justify-content: space-between;\n      gap: 10px;\n      padding: 0 6px;\n      margin-top: 2px;\n    }\n    .trendin"
+bundled window "tom: 14px;\n      gap: 12px;\n    }\n    .trending-carousel-section .hianime-trending-header .hianime-heading {\n      margin-bottom: 0;\n    }\n\n    /* per-section carousel arrows (mirrored on the sides of each track) */\n    /* Horizontal controls bar under the row (the old stacked column on the\n       right is what the user circled as broken). */\n    .trending-carousel-section .hianime-carousel-arrows {\n      display: flex;\n      flex-direc"

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover"/>
+<title>spotlight search placement test</title>
+<style>
+  body { margin: 0; background: #0c0d16; color: #fff; font-family: system-ui, sans-serif; padding: 20px; }
+  .spotlight-slider-section { position: relative; height: 420px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); }
+  .spotlight-slide-backdrop { position: absolute; right: 0; top: 0; width: 68%; height: 100%; object-fit: cover; background: #1a1b2e; }
+  .spotlight-gradient-overlay { position: absolute; inset: 0; background: linear-gradient(90deg, #0e0f19 0%, #0e0f19 36%, rgba(14,15,25,0.75) 60%, rgba(14,15,25,0.1) 100%); }
+  .spotlight-content-wrap { position: relative; z-index: 5; padding: 40px 48px; max-width: 620px; display: flex; flex-direction: column; justify-content: center; }
+  .spotlight-nav-controls { position: absolute; right: 28px; bottom: 84px; z-index: 10; display: flex; flex-direction: column; gap: 8px; }
+  .spotlight-arrow-btn { width: 38px; height: 38px; border-radius: 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: #fff; cursor: pointer; }
+  .search-box { position: relative; width: 100%; display: flex; align-items: center; background: #141525; border: 1px solid rgba(255,255,255,0.14); border-radius: 22px; padding: 3px 4px 3px 14px; }
+  .search-input { flex: 1; height: 34px; padding: 0 8px 0 0; background: transparent; border: none; color: #fff; font-size: 13.5px; outline: none; }
+  .search-icon-btn { width: 32px; height: 32px; border-radius: 50%; background: transparent; border: 1px solid rgba(255,255,255,0.15); color: #ffbade; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .search-filter-btn { padding: 5px 12px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; color: #d1d5db; cursor: pointer; }
+
+  .spotlight-search-mobile { display: none; position: absolute; left: 28px; bottom: 18px; z-index: 12; width: calc(100% - 56px); max-width: 420px; }
+  @media (max-width: 768px) {
+    .spotlight-search-mobile { display: block; }
+  }
+</style>
+</head>
+<body>
+  <h2>Desktop (>768px): search should stay in top bar</h2>
+  <div class="spotlight-slider-section">
+    <div class="spotlight-slide-backdrop"></div>
+    <div class="spotlight-gradient-overlay"></div>
+    <div class="spotlight-content-wrap">
+      <div>TITLE</div>
+      <div>DESCRIPTION</div>
+    </div>
+    <div class="spotlight-nav-controls">
+      <button class="spotlight-arrow-btn">prev</button>
+      <button class="spotlight-arrow-btn">next</button>
+    </div>
+    <div class="spotlight-search-mobile">
+      <div class="search-box">
+        <input class="search-input" placeholder="Search anime..." />
+        <button class="search-filter-btn">Filter</button>
+        <button class="search-icon-btn">search</button>
+      </div>
+    </div>
+  </div>
+
+  <p style="margin-top:20px;">Resize below 768px to see search move to slider bottom.</p>
+</body>
+</html>

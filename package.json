@@ -1,0 +1,18 @@
+{
+  "name": "all-api",
+  "version": "2.2.1",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "build": "node scripts/bundle-frontend.js"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1",
+    "dotenv": "^16.4.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "wreq-js": "^3.2.0"
+  }
+}

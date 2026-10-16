@@ -1,0 +1,76 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "User account data, watch progress, and watchlist",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User email address"
+        },
+        "watchProgress": {
+          "type": "object",
+          "description": "Map of anime ID to episode progress details"
+        },
+        "watchlist": {
+          "type": "object",
+          "description": "Map of bookmarked anime"
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Timestamp of the last update"
+        }
+      },
+      "required": ["email"]
+    },
+    "FeedbackReport": {
+      "title": "Feedback Report",
+      "description": "User report for missing episodes, broken streams, or general feedback",
+      "type": "object",
+      "properties": {
+        "animeId": {
+          "type": "string",
+          "description": "ID of the anime being reported"
+        },
+        "animeTitle": {
+          "type": "string",
+          "description": "Title of the anime"
+        },
+        "episode": {
+          "type": "number",
+          "description": "Episode number if applicable"
+        },
+        "issueType": {
+          "type": "string",
+          "enum": ["missing_episode", "playback_error", "audio_sub_issue", "wrong_metadata", "general_feedback"],
+          "description": "Category of the issue"
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed explanation of the issue"
+        },
+        "userContact": {
+          "type": "string",
+          "description": "Optional email or Discord handle"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Timestamp when the report was submitted"
+        }
+      },
+      "required": ["issueType", "description", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile containing their watch progress and watchlist"
+    },
+    "/feedback/{reportId}": {
+      "schema": "FeedbackReport",
+      "description": "User submitted issue reports and feedback"
+    }
+  }
+}

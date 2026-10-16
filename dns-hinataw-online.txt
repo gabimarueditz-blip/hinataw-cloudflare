@@ -1,0 +1,65 @@
+========================================================================
+ DNS SETUP FOR  hinataw.online   ->  Vercel project: 99anime-api
+ Generated: 2026-10-07
+========================================================================
+
+!!! READ FIRST !!!
+Vercel is NOT asking for a TXT ownership record for this domain.
+`vercel domains verify hinataw.online` reports:
+    acceptedChallenges : []          (no TXT challenge pending)
+    project.verification : []        (nothing to prove)
+    project.verified : true          (ownership already satisfied)
+    domainOwnership : "current-scope"
+The ONLY problem Vercel reports is "invalid DNS configuration".
+So there is no TXT token to paste. The fix is the DNS records below.
+
+------------------------------------------------------------------------
+OPTION A  (RECOMMENDED) - Use Vercel nameservers
+------------------------------------------------------------------------
+At GoDaddy: Domain > Nameservers > Change > "I'll use my own nameservers"
+and enter ONLY these two (delete any others):
+
+    ns1.vercel-dns.com
+    ns2.vercel-dns.com
+
+Then Vercel manages A / CNAME / SSL for both apex and www automatically.
+Wait ~5-30 min for propagation.
+
+------------------------------------------------------------------------
+OPTION B - Keep GoDaddy nameservers, add records manually
+------------------------------------------------------------------------
+In GoDaddy DNS manager for hinataw.online, create:
+
+    Type   Name   Value
+    ----   ----   ---------------------------------
+    A      @      216.198.79.1
+    A      @      64.29.17.1
+    CNAME  www    cname.vercel-dns.com
+
+(Rank-2 legacy fallbacks, only if the above does not work:
+    A      @      76.76.21.21
+    CNAME  www    de5d21bd538dd1af.vercel-dns-017.com )
+
+------------------------------------------------------------------------
+AFTER CHANGING DNS
+------------------------------------------------------------------------
+Run:
+    vercel domains verify hinataw.online --json
+Expect:  "status": "verified"  /  "misconfigured": false
+
+Then confirm both hosts serve the site over HTTPS:
+    https://hinataw.online
+    https://www.hinataw.online
+
+------------------------------------------------------------------------
+IMPORTANT BLOCKER (checked 2026-10-07)
+------------------------------------------------------------------------
+Live public DNS for hinataw.online is currently NXDOMAIN (Google 8.8.8.8
+and Cloudflare 1.1.1.1), and the .online registry RDAP says:
+
+    "Domain hinataw.online is available for registration"
+
+That means the domain is NOT registered / delegated yet. DNS records only
+work once the registration is active in your GoDaddy account. Finish /
+confirm the domain purchase first, then apply Option A or B above.
+========================================================================

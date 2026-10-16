@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Hinataw.exe">
+  <defs>
+    <linearGradient id="hinatawTile" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#141526" />
+      <stop offset="100%" stop-color="#08080d" />
+    </linearGradient>
+  </defs>
+
+  <rect width="100" height="100" rx="24" fill="url(#hinatawTile)"/>
+  <circle cx="50" cy="50" r="36" fill="none" stroke="#ff6ea8" stroke-width="5"/>
+
+  <!-- H monogram -->
+  <path d="M24 34 h8 v13 h16 v-13 h8 v32 h-8 v-13 h-16 v13 h-8 z" fill="#ffffff"/>
+
+  <!-- play triangle accent -->
+  <path d="M62 53 l13 6 l-13 6 z" fill="#ff6ea8"/>
+</svg>

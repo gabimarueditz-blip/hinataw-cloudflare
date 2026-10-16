@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!--
+    Manga portal — a completely separate page from the anime app, opened in its
+    own tab. It owns its search box, browse tabs, genre filters, bookmarks
+    (localStorage) and reading view, and talks only to the site's own
+    /api/manga/* endpoints (the CDN is relayed server-side).
+
+    Owner ad tag (zone 12024830) parked inert, exactly as supplied. It is armed
+    only when a manga is opened or read, never on page load.
+  -->
+  <script id="ownerAdTag" type="text/plain">(function(s){s.dataset.zone='12024830',s.src='https://al5sm.com/tag.min.js'})([document.documentElement, document.body].filter(Boolean).pop().appendChild(document.createElement('script')))</script>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover"/>
+  <title>Manga — Hinataw.exe</title>
+  <meta name="description" content="Read manga online on Hinataw.exe — search, bookmark and read chapters with a dedicated reader."/>
+  <meta name="robots" content="noindex"/>
+  <link rel="icon" type="image/png" href="favicon.png"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --bg: #08080f;
+      --panel: #12131f;
+      --panel-2: #171829;
+      --border: rgba(255,255,255,0.09);
+      --border-hover: rgba(255,255,255,0.18);
+      --text: #ffffff;
+      --text-muted: #a9a9bd;
+      --text-faint: #7e7e94;
+      --accent: #ff6ea8;
+      --accent-soft: rgba(255,110,168,0.14);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background:
+        radial-gradient(1100px 520px at 12% -12%, rgba(255,110,168,0.14), transparent 58%),
+        radial-gradient(900px 480px at 100% 0%, rgba(120,140,255,0.10), transparent 55%),
+        var(--bg);
+      color: var(--text);
+      font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    button { font-family: inherit; cursor: pointer; }
+
+    .m-top {
+      position: sticky; top: 0; z-index: 60;
+      background: rgba(8,8,15,0.88);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+    }
+    .m-top-inner {
+      max-width: 1280px; margin: 0 auto; padding: 12px 18px;
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    }
+    .m-brand {
+      display: flex; align-items: center; gap: 10px; font-family: "Syne", sans-serif;
+      font-weight: 800; font-size: 18px; letter-spacing: -0.02em; white-space: nowrap;
+    }
+    .m-brand .exe { color: var(--accent); }
+    .m-brand img { width: 28px; height: 28px; border-radius: 8px; }
+    .m-search-wrap { flex: 1; min-width: 220px; display: flex; gap: 8px; }
+    .m-search-input {
+      flex: 1; height: 40px; padding: 0 15px; border-radius: 11px;
+      background: var(--panel); border: 1px solid var(--border); color: var(--text);
+      font-size: 13.5px; outline: none; transition: border-color .15s;
+    }
+    .m-search-input:focus { border-color: rgba(255,110,168,0.55); }
+    .m-btn {
+      height: 40px; padding: 0 18px; border-radius: 11px; border: 1px solid var(--border);
+      background: var(--panel); color: var(--text); font-size: 13px; font-weight: 600;
+      display: inline-flex; align-items: center; gap: 7px; transition: all .15s;
+    }
+    .m-btn:hover { border-color: var(--border-hover); background: var(--panel-2); }
+    .m-btn.primary { background: var(--accent); border-color: var(--accent); color: #0b0c16; }
+    .m-btn.primary:hover { filter: brightness(1.07); }
+    .m-btn.ghost { background: transparent; }
+    .m-btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    .m-shell { max-width: 1280px; margin: 0 auto; padding: 22px 18px 90px; }
+
+    .m-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .m-tab {
+      padding: 8px 15px; border-radius: 999px; border: 1px solid var(--border);
+      background: var(--panel); color: var(--text-muted); font-size: 12.5px; font-weight: 600;
+      transition: all .15s;
+    }
+    .m-tab:hover { color: var(--text); border-color: var(--border-hover); }
+    .m-tab.active { background: var(--accent-soft); border-color: rgba(255,110,168,0.5); color: #ffbade; }
+
+    .m-genres { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 20px; }
+    .m-genre {
+      padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border);
+      background: transparent; color: var(--text-faint); font-size: 11.5px; font-weight: 600;
+    }
+    .m-genre:hover { color: var(--text); border-color: var(--border-hover); }
+    .m-genre.active { color: #ffbade; border-color: rgba(255,110,168,0.5); background: var(--accent-soft); }
+
+    .m-heading { font-size: 16px; font-weight: 800; margin: 0 0 14px; letter-spacing: -0.01em; }
+    .m-grid {
+      display: grid; gap: 16px;
+      grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+    }
+    .m-card { cursor: pointer; }
+    .m-poster {
+      position: relative; width: 100%; aspect-ratio: 3 / 4.35; border-radius: 12px; overflow: hidden;
+      background: #0c0d18; border: 1px solid var(--border); transition: transform .18s, border-color .18s;
+    }
+    .m-card:hover .m-poster { transform: translateY(-3px); border-color: rgba(255,110,168,0.45); }
+    .m-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .m-bm {
+      position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; border-radius: 9px;
+      border: 1px solid rgba(255,255,255,0.18); background: rgba(6,7,14,0.66); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-size: 14px; line-height: 1;
+      backdrop-filter: blur(4px);
+    }
+    .m-bm.active { background: var(--accent); border-color: var(--accent); color: #0b0c16; }
+    .m-chip-under {
+      position: absolute; bottom: 8px; left: 8px; padding: 3px 8px; border-radius: 7px;
+      background: rgba(6,7,14,0.8); border: 1px solid rgba(255,255,255,0.14);
+      font-size: 10.5px; font-weight: 700; color: #ffd0e4; max-width: calc(100% - 16px);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .m-title { font-size: 12.5px; font-weight: 700; line-height: 1.35; margin-top: 9px;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .m-sub { font-size: 11px; color: var(--text-faint); margin-top: 3px; }
+
+    .m-empty { padding: 44px 18px; text-align: center; color: var(--text-faint); font-size: 13.5px; }
+    .m-pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 26px; }
+    .m-page-label { font-size: 12.5px; color: var(--text-muted); }
+
+    /* Detail */
+    .m-detail { display: none; }
+    .m-detail-top { display: flex; gap: 24px; margin-bottom: 26px; }
+    .m-detail-poster { width: 200px; flex: 0 0 200px; aspect-ratio: 3 / 4.35; border-radius: 14px; overflow: hidden; border: 1px solid var(--border); background: #0c0d18; }
+    .m-detail-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .m-detail-title { font-size: 25px; font-weight: 800; margin: 0 0 6px; letter-spacing: -0.02em; }
+    .m-alt { font-size: 13px; color: var(--text-faint); margin-bottom: 12px; }
+    .m-chips { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 12px; }
+    .m-chip { padding: 5px 11px; border-radius: 999px; background: rgba(255,255,255,0.05); border: 1px solid var(--border); font-size: 11.5px; color: var(--text-muted); }
+    .m-chip.genre { cursor: pointer; }
+    .m-chip.genre:hover { color: #ffbade; border-color: rgba(255,110,168,0.5); }
+    .m-desc { font-size: 13.5px; line-height: 1.65; color: var(--text-muted); margin-bottom: 18px; max-width: 760px; }
+    .m-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    .m-chapters { display: flex; flex-direction: column; gap: 7px; }
+    .m-chapter-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 12px 15px; border-radius: 11px; border: 1px solid var(--border);
+      background: rgba(255,255,255,0.025); font-size: 13px; cursor: pointer; transition: all .14s;
+    }
+    .m-chapter-row:hover { background: rgba(255,110,168,0.09); border-color: rgba(255,110,168,0.4); }
+    .m-chapter-date { font-size: 11px; color: var(--text-faint); }
+
+    /* Reader */
+    #mangaReaderOverlay { position: fixed; inset: 0; z-index: 3000; background: #06060c; display: none; flex-direction: column; }
+    .m-reader-bar {
+      display: flex; align-items: center; gap: 10px; padding: 10px 16px; flex: 0 0 auto; flex-wrap: wrap;
+      background: rgba(11,12,22,0.97); border-bottom: 1px solid var(--border);
+    }
+    .m-reader-title { flex: 1; min-width: 130px; }
+    .m-reader-title .rt { font-size: 13.5px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .m-reader-title .rc { font-size: 11.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .m-reader-bar select { height: 38px; max-width: 240px; border-radius: 10px; background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 0 10px; font-size: 12.5px; }
+    .m-reader-pages { flex: 1; overflow-y: auto; padding: 16px 10px 70px; }
+    .m-reader-inner { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+    .m-reader-inner img { width: 100%; display: block; background: #0b0c16; min-height: 240px; }
+    .m-reader-foot { text-align: center; color: var(--text-faint); font-size: 12.5px; padding: 14px 0 6px; }
+
+    #adGateOverlay { position: fixed; inset: 0; z-index: 9000; background: rgba(6,6,12,0.96); display: none; align-items: center; justify-content: center; padding: 22px; }
+
+    @media (max-width: 720px) {
+      .m-detail-top { flex-direction: column; }
+      .m-detail-poster { width: 146px; flex-basis: auto; }
+      .m-reader-bar select { max-width: 130px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="m-top">
+    <div class="m-top-inner">
+      <a class="m-brand" href="/" title="Back to Hinataw.exe"><img src="logo-128.png" alt="" onerror="this.style.display='none'"/><span>Hinataw<span class="exe">.exe</span></span></a>
+      <div class="m-search-wrap">
+        <input id="mSearch" class="m-search-input" type="search" placeholder="Search manga titles…" autocomplete="off"/>
+        <button class="m-btn primary" onclick="mangaSearch()">Search</button>
+      </div>
+      <button class="m-btn ghost" id="mBookmarkTabBtn" onclick="showBookmarks()">🔖 Bookmarks <span id="mBookmarkCount"></span></button>
+      <button class="m-btn ghost" id="mFilterBtn" onclick="toggleGenreFilter()" title="Show genres">Filter</button>
+      <button class="m-btn ghost" onclick="location.href='/'">← Anime</button>
+    </div>
+  </header>
+
+  <main class="m-shell">
+    <section id="mBrowseView">
+      <div class="m-tabs">
+        <button class="m-tab active" data-mode="hot" onclick="mangaMode('hot')">Popular</button>
+        <button class="m-tab" data-mode="latest" onclick="mangaMode('latest')">Latest</button>
+        <button class="m-tab" data-mode="new" onclick="mangaMode('new')">New</button>
+        <button class="m-tab" data-mode="completed" onclick="mangaMode('completed')">Completed</button>
+      </div>
+      <div class="m-genres" id="mGenres" style="display:none;"></div>
+      <div id="mGenresToggleWrap" class="m-genres-toggle" style="display:none;">
+        <button class="m-btn ghost" onclick="toggleGenreFilter()">Filter ▾</button>
+      </div>
+      <h2 class="m-heading" id="mHeading">Popular Manga</h2>
+      <div class="m-grid" id="mGrid"></div>
+      <div id="mEmpty" class="m-empty" style="display:none;"></div>
+      <div class="m-pager" id="mPager" style="display:none;">
+        <button class="m-btn" id="mPrev" onclick="mangaPage(-1)">← Prev</button>
+        <span class="m-page-label" id="mPageLabel"></span>
+        <button class="m-btn" id="mNext" onclick="mangaPage(1)">Next →</button>
+      </div>
+    </section>
+
+    <section id="mDetailView" class="m-detail">
+      <button class="m-btn ghost" style="margin-bottom:16px;" onclick="backToBrowse()">← Back to browse</button>
+      <div id="mDetailBody"></div>
+    </section>
+  </main>
+
+  <div id="mangaReaderOverlay">
+    <div class="m-reader-bar">
+      <button class="m-btn ghost" onclick="closeReader()">← Back</button>
+      <div class="m-reader-title">
+        <div class="rt" id="readerTitle"></div>
+        <div class="rc" id="readerChapter"></div>
+      </div>
+      <select id="readerChapterSelect" onchange="readerJump(this.value)"></select>
+      <button class="m-btn ghost" id="readerPrev" onclick="readerStep(-1)">← Prev</button>
+      <button class="m-btn primary" id="readerNext" onclick="readerStep(1)">Next →</button>
+    </div>
+    <div class="m-reader-pages" id="readerPages"></div>
+  </div>
+
+  <div id="adGateOverlay">
+    <div style="max-width:440px;text-align:center;">
+      <h2 style="font-size:19px;font-weight:800;margin-bottom:8px;">Ad blocker detected</h2>
+      <p style="font-size:13.5px;line-height:1.6;color:#b9b9c9;">Hinataw.exe is free and runs on ad revenue. Please turn off your ad blocker for this site, then reload.</p>
+      <button class="m-btn primary" style="margin-top:14px;" onclick="location.reload()">I turned it off — Reload</button>
+    </div>
+  </div>
+
+  <script>
+    // ===================== AD GATE =====================
+    // Same rule as the anime app: the parked tag in <head> is NEVER live until a
+    // manga is actually opened or read (or a download affordance is clicked).
+    // One-shot-per-session: the popunder may arm at most once per browser session
+    // (reload-safe because the flag is in sessionStorage, cleared on tab close).
+    let __ownerAdArmed = false;
+    const OWNER_AD_SESSION_KEY = 'animeq_owner_ad_armed_v1';
+    function sessionHasArmed() {
+      try { return sessionStorage.getItem(OWNER_AD_SESSION_KEY) === '1'; } catch (e) { return false; }
+    }
+    function markSessionArmed() {
+      try { sessionStorage.setItem(OWNER_AD_SESSION_KEY, '1'); } catch (e) {}
+    }
+    function armOwnerAd() {
+      if (__ownerAdArmed) return;
+      if (sessionHasArmed()) return;
+      __ownerAdArmed = true;
+      markSessionArmed();
+      const parked = document.getElementById('ownerAdTag');
+      if (!parked) return;
+      try {
+        const live = document.createElement('script');
+        live.textContent = parked.textContent || '';
+        document.body.appendChild(live);
+      } catch (e) {}
+    }
+
+    // Owner's zone-12024830 popunder is the ONLY ad on the site. Until a gated
+    // action arms it (open manga / read chapter / download), every popup window
+    // is blocked, including the "open the manga portal in a new tab" calls the
+    // home page makes.
+    const __realWindowOpen = window.open ? window.open.bind(window) : null;
+    try {
+      window.open = function (url, target, features) {
+        if (__ownerAdArmed) {
+          return __realWindowOpen ? __realWindowOpen(url, target, features) : null;
+        }
+        console.log('Blocked popup window attempt.');
+        return null;
+      };
+    } catch (e) {}
+
+    // Any download control (<a download>, data-ad-trigger="download", or a
+    // button whose title contains "download") arms the tag too — without
+    // letting the actual download link open.
+    document.addEventListener('click', function (ev) {
+      const el = ev.target && ev.target.closest
+        ? ev.target.closest('a[download], [data-ad-trigger="download"], [onclick*="download" i], button[title*="download" i]')
+        : null;
+      if (el) armOwnerAd();
+    }, true);
+
+    function adBlockerDetected() {
+      let hidden = false;
+      try {
+        const bait1 = document.createElement('div');
+        bait1.className = 'adsbox ad-banner ad-placement pub_300x250 text-ad doubleclick';
+        bait1.style.cssText = 'position:absolute!important;left:-9999px!important;top:-9999px!important;width:12px;height:12px;';
+        document.body.appendChild(bait1);
+        if (bait1.offsetHeight === 0 || bait1.offsetParent === null || bait1.clientHeight === 0) hidden = true;
+        bait1.remove();
+
+        const bait2 = document.createElement('div');
+        bait2.className = 'ad-container ad-slot ad-unit advertisement ad-wrapper brick adholder';
+        bait2.style.cssText = 'position:absolute!important;left:-9999px!important;top:-9999px!important;width:12px;height:12px;visibility:hidden!important;';
+        document.body.appendChild(bait2);
+        if (bait2.offsetHeight === 0 || bait2.offsetParent === null || bait2.clientHeight === 0 || bait2.offsetWidth === 0) hidden = true;
+        bait2.remove();
+      } catch (e) { hidden = false; }
+      try { window.__adGateDetection = { blocked: hidden }; } catch (e) {}
+      return hidden;
+    }
+    function checkAdGate() {
+      const overlay = document.getElementById('adGateOverlay');
+      if (adBlockerDetected()) { if (overlay) overlay.style.display = 'flex'; return false; }
+      if (overlay) overlay.style.display = 'none';
+      return true;
+    }
+    setInterval(checkAdGate, 4000);
+
+    (function runFirstAdGateCheck() {
+      try { if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', checkAdGate, { once: true });
+      } else { checkAdGate(); } } catch (e) {}
+    })();
+
+    // ===================== STATE =====================
+    const BM_KEY = 'hinataw_manga_bookmarks';
+    const state = {
+      mode: 'hot', genre: '', page: 1, query: '',
+      genres: [], detailReq: 0, readerReq: 0,
+      reader: null, detail: null,
+    };
+
+    const cleanSlug = (v) => String(v || '').replace(/[^a-z0-9.\-]/gi, '');
+    const esc = (v) => String(v == null ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+    function mangaImg(url) {
+      const u = String(url || '');
+      if (!u) return '';
+      if (u.startsWith('/')) return u;
+      return '/api/manga/image?u=' + encodeURIComponent(u);
+    }
+
+    // ---------- Bookmarks (local to this browser) ----------
+    function readBookmarks() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(BM_KEY) || '[]');
+        return Array.isArray(raw) ? raw : [];
+      } catch (e) { return []; }
+    }
+    function writeBookmarks(list) {
+      try { localStorage.setItem(BM_KEY, JSON.stringify(list.slice(0, 500))); } catch (e) {}
+      renderBookmarkCount();
+    }
+    function isBookmarked(slug) {
+      return readBookmarks().some((b) => b.slug === slug);
+    }
+    function toggleBookmark(item, ev) {
+      if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+      const slug = cleanSlug(item.slug);
+      if (!slug) return;
+      const list = readBookmarks();
+      const idx = list.findIndex((b) => b.slug === slug);
+      if (idx >= 0) {
+        list.splice(idx, 1);
+      } else {
+        list.unshift({
+          slug,
+          title: item.title || slug.replace(/-/g, ' '),
+          poster: item.poster || '',
+          addedAt: Date.now(),
+        });
+      }
+      writeBookmarks(list);
+      // Repaint the grid state without a network round-trip.
+      document.querySelectorAll(`[data-bm-slug="${slug}"]`).forEach((el) => {
+        const on = isBookmarked(slug);
+        el.classList.toggle('active', on);
+        el.textContent = on ? '★' : '☆';
+        el.title = on ? 'Remove bookmark' : 'Add bookmark';
+      });
+    }
+    function renderBookmarkCount() {
+      const el = document.getElementById('mBookmarkCount');
+      if (el) el.textContent = readBookmarks().length ? '(' + readBookmarks().length + ')' : '';
+    }
+    function showBookmarks() {
+      state.query = ''; state.genre = ''; state.page = 1;
+      const input = document.getElementById('mSearch');
+      if (input) input.value = '';
+      syncTabs();
+      const list = readBookmarks();
+      const heading = document.getElementById('mHeading');
+      if (heading) heading.textContent = 'Your bookmarks';
+      renderGrid(list);
+      const empty = document.getElementById('mEmpty');
+      if (empty) {
+        empty.style.display = list.length ? 'none' : 'block';
+        empty.textContent = list.length ? '' : 'No bookmarks yet — tap ☆ on any manga poster to save it here.';
+      }
+      const pager = document.getElementById('mPager');
+      if (pager) pager.style.display = 'none';
+    }
+
+    // ---------- Grid ----------
+    function cardHtml(item) {
+      const slug = cleanSlug(item.slug);
+      const title = item.title || slug.replace(/-/g, ' ');
+      const chapter = item.latestChapter || '';
+      const on = isBookmarked(slug);
+      return `
+        <div class="m-card" onclick="openDetail('${slug}')" data-title="${esc(title)}">
+          <div class="m-poster">
+            <img src="${esc(mangaImg(item.poster))}" referrerpolicy="no-referrer" loading="lazy" alt="${esc(title)}"
+                 onerror="this.style.opacity=0.15"/>
+            <button class="m-bm${on ? ' active' : ''}" data-bm-slug="${esc(slug)}"
+                    title="${on ? 'Remove bookmark' : 'Add bookmark'}"
+                    onclick="toggleBookmark({slug:'${slug}',title:this.closest('.m-card').getAttribute('data-title'),poster:'${esc(String(item.poster || '').replace(/'/g, ''))}'}, event)"
+            >${on ? '★' : '☆'}</button>
+            ${chapter ? `<span class="m-chip-under">${esc(chapter)}</span>` : ''}
+          </div>
+          <div class="m-title">${esc(title)}</div>
+        </div>
+      `;
+    }
+
+    function renderGrid(items) {
+      const grid = document.getElementById('mGrid');
+      if (!grid) return;
+      grid.innerHTML = (items || []).map(cardHtml).join('');
+    }
+
+    function syncTabs() {
+      document.querySelectorAll('#mBrowseView .m-tab[data-mode]').forEach((t) => {
+        t.classList.toggle('active', !state.query && !state.genre && t.getAttribute('data-mode') === state.mode);
+      });
+    }
+
+    function renderGenres() {
+      const row = document.getElementById('mGenres');
+      if (!row) return;
+      row.innerHTML = (state.genres || []).map((g) => {
+        const slug = cleanSlug(g.slug);
+        const active = state.genre === slug ? ' active' : '';
+        return `<button class="m-genre${active}" onclick="pickGenre('${slug}');toggleGenreFilter();">${esc(g.name)}</button>`;
+      }).join('');
+      const wrap = document.getElementById('mGenresToggleWrap');
+      if (wrap) {
+        wrap.style.display = (state.genres && state.genres.length) ? 'flex' : 'none';
+      }
+    }
+
+    function toggleGenreFilter() {
+      const row = document.getElementById('mGenres');
+      const wrap = document.getElementById('mGenresToggleWrap');
+      if (!row) return;
+      const visible = row.style.display !== 'none';
+      row.style.display = visible ? 'none' : 'flex';
+      if (wrap) wrap.style.display = visible ? 'none' : 'flex';
+    }
+
+    function pickGenre(slug) {
+      state.query = ''; state.genre = cleanSlug(slug); state.page = 1;
+      const input = document.getElementById('mSearch');
+      if (input) input.value = '';
+      syncTabs();
+      renderGenres();
+      loadBrowse();
+    }
+
+    function mangaMode(mode) {
+      state.mode = mode || 'latest'; state.genre = ''; state.query = ''; state.page = 1;
+      const input = document.getElementById('mSearch');
+      if (input) input.value = '';
+      syncTabs();
+      renderGenres();
+      loadBrowse();
+    }
+
+    function mangaSearch() {
+      const input = document.getElementById('mSearch');
+      const q = ((input && input.value) || '').trim();
+      state.query = q; state.genre = ''; state.page = 1;
+      syncTabs();
+      renderGenres();
+      loadBrowse();
+    }
+
+    function mangaPage(delta) {
+      const next = Math.max(1, state.page + delta);
+      if (next === state.page) return;
+      state.page = next;
+      loadBrowse();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    async function loadBrowse() {
+      const grid = document.getElementById('mGrid');
+      const empty = document.getElementById('mEmpty');
+      const pager = document.getElementById('mPager');
+      const heading = document.getElementById('mHeading');
+      const label = document.getElementById('mPageLabel');
+      if (!grid || !empty) return;
+      grid.innerHTML = '';
+      pager.style.display = 'none';
+      empty.style.display = 'block';
+      empty.textContent = 'Loading…';
+      try {
+        const url = state.query
+          ? `/api/manga/search?q=${encodeURIComponent(state.query)}`
+          : (state.genre
+              ? `/api/manga/browse?g=${encodeURIComponent(state.genre)}&page=${state.page}`
+              : `/api/manga/browse?type=${encodeURIComponent(state.mode)}&page=${state.page}`);
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!data || !data.success) throw new Error('unavailable');
+        const items = (state.query ? data.results : data.items) || [];
+        if (heading) {
+          heading.textContent = state.query
+            ? `Results for “${state.query}”`
+            : (data.heading || (state.genre ? 'Genre' : 'Popular Manga'));
+        }
+        if (!items.length) {
+          empty.textContent = state.query ? 'No results found.' : 'Nothing here right now.';
+          return;
+        }
+        empty.style.display = 'none';
+        renderGrid(items);
+        const totalPages = state.query ? 1 : Math.max(1, Number(data.totalPages) || 1);
+        if (!state.query && !state.genre && totalPages > 1) {
+          pager.style.display = 'flex';
+          if (label) label.textContent = `Page ${state.page} of ${totalPages}`;
+          const prev = document.getElementById('mPrev');
+          const next = document.getElementById('mNext');
+          if (prev) prev.disabled = state.page <= 1;
+          if (next) next.disabled = state.page >= totalPages;
+        }
+      } catch (e) {
+        empty.textContent = 'The manga catalogue is unavailable right now. Please try again later.';
+      }
+    }
+
+    // ---------- Detail ----------
+    function openDetail(slugInput) {
+      const slug = cleanSlug(slugInput);
+      if (!slug) return;
+      armOwnerAd();
+      const browse = document.getElementById('mBrowseView');
+      const detail = document.getElementById('mDetailView');
+      const body = document.getElementById('mDetailBody');
+      if (browse) browse.style.display = 'none';
+      if (detail) detail.style.display = 'block';
+      if (body) body.innerHTML = '<div class="m-empty">Loading details…</div>';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      const reqId = ++state.detailReq;
+      fetch(`/api/manga/info?slug=${encodeURIComponent(slug)}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (reqId !== state.detailReq) return;
+          if (!data || !data.success || !data.manga) throw new Error('unavailable');
+          state.detail = data.manga;
+          renderDetail(data.manga);
+        })
+        .catch(() => {
+          if (reqId !== state.detailReq) return;
+          if (body) body.innerHTML = '<div class="m-empty">This title is unavailable right now. Please try again later.</div>';
+        });
+    }
+
+    function renderDetail(m) {
+      const body = document.getElementById('mDetailBody');
+      if (!body) return;
+      const slug = cleanSlug(m.slug);
+      const chapters = Array.isArray(m.chapters) ? m.chapters : [];
+      const firstSlug = cleanSlug(m.firstChapterSlug) || (chapters.length ? cleanSlug(chapters[chapters.length - 1].slug) : '');
+      const latestSlug = cleanSlug(m.latestChapterSlug) || (chapters.length ? cleanSlug(chapters[0].slug) : '');
+      const genres = (m.genres || []).filter((g) => g && g.slug);
+      const on = isBookmarked(slug);
+      document.title = (m.title || 'Manga') + ' — Hinataw.exe';
+
+      const meta = [];
+      if (m.status) meta.push(esc(m.status));
+      if (m.author) meta.push(esc(m.author));
+      if (m.rating) meta.push('★ ' + esc(m.rating));
+      meta.push(chapters.length + ' chapters');
+
+      body.innerHTML = `
+        <div class="m-detail-top">
+          <div class="m-detail-poster"><img src="${esc(mangaImg(m.posterSrc || m.poster))}" referrerpolicy="no-referrer" alt="${esc(m.title)}" onerror="this.style.opacity=0.15"/></div>
+          <div style="flex:1;min-width:0;">
+            <h1 class="m-detail-title">${esc(m.title)}</h1>
+            ${m.alternative ? `<div class="m-alt">${esc(m.alternative)}</div>` : ''}
+            <div class="m-chips">${meta.map((t) => `<span class="m-chip">${t}</span>`).join('')}</div>
+            ${genres.length ? `<div class="m-chips">${genres.map((g) => `<span class="m-chip genre" onclick="pickGenre('${cleanSlug(g.slug)}');backToBrowse();">${esc(g.name)}</span>`).join('')}</div>` : ''}
+            ${m.description ? `<p class="m-desc">${esc(m.description)}</p>` : ''}
+            <div class="m-actions">
+              ${firstSlug ? `<button class="m-btn primary" onclick="openReader('${slug}','${firstSlug}')">▶ Read First</button>` : ''}
+              ${latestSlug && latestSlug !== firstSlug ? `<button class="m-btn" onclick="openReader('${slug}','${latestSlug}')">Read Latest</button>` : ''}
+              <button class="m-btn${on ? ' primary' : ''}" id="detailBookmarkBtn" onclick="toggleDetailBookmark()">${on ? '★ Bookmarked' : '☆ Bookmark'}</button>
+            </div>
+          </div>
+        </div>
+        <div class="m-chapters">
+          ${chapters.length ? chapters.map((c) => `
+            <div class="m-chapter-row" onclick="openReader('${slug}','${cleanSlug(c.slug)}')">
+              <span>${esc(c.name || ('Chapter ' + c.number))}</span>
+              <span class="m-chapter-date">${esc(String(c.updatedAt || '').slice(0, 10))}</span>
+            </div>`).join('') : '<div class="m-empty">No chapters listed yet.</div>'}
+        </div>
+      `;
+    }
+
+    function toggleDetailBookmark() {
+      const m = state.detail;
+      if (!m) return;
+      const slug = cleanSlug(m.slug);
+      toggleBookmark({ slug, title: m.title, poster: m.posterSrc || m.poster });
+      const btn = document.getElementById('detailBookmarkBtn');
+      if (btn) {
+        const on = isBookmarked(slug);
+        btn.classList.toggle('primary', on);
+        btn.textContent = on ? '★ Bookmarked' : '☆ Bookmark';
+      }
+    }
+
+    function backToBrowse() {
+      state.detailReq++;
+      const browse = document.getElementById('mBrowseView');
+      const detail = document.getElementById('mDetailView');
+      if (detail) detail.style.display = 'none';
+      if (browse) browse.style.display = 'block';
+      document.title = 'Manga — Hinataw.exe';
+      if (!document.getElementById('mGrid').children.length) loadBrowse();
+    }
+
+    // ---------- Reader ----------
+    function openReader(slugInput, chapterInput) {
+      const slug = cleanSlug(slugInput);
+      const chapter = cleanSlug(chapterInput);
+      if (!slug || !chapter) return;
+      armOwnerAd();
+      const overlay = document.getElementById('mangaReaderOverlay');
+      const pages = document.getElementById('readerPages');
+      if (!overlay || !pages) return;
+      overlay.style.display = 'flex';
+      pages.scrollTop = 0;
+      pages.innerHTML = '<div class="m-empty">Loading pages…</div>';
+      const reqId = ++state.readerReq;
+      fetch(`/api/manga/chapter?slug=${encodeURIComponent(slug)}&chapter=${encodeURIComponent(chapter)}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (reqId !== state.readerReq) return;
+          if (!data || !data.success || !data.chapter) throw new Error('unavailable');
+          renderReader(slug, data.chapter);
+        })
+        .catch(() => {
+          if (reqId !== state.readerReq) return;
+          pages.innerHTML = '<div class="m-empty">This chapter could not be loaded. Please try another one.</div>';
+        });
+    }
+
+    function renderReader(slug, chapter) {
+      const pages = document.getElementById('readerPages');
+      const titleEl = document.getElementById('readerTitle');
+      const chapEl = document.getElementById('readerChapter');
+      const select = document.getElementById('readerChapterSelect');
+      const prevBtn = document.getElementById('readerPrev');
+      const nextBtn = document.getElementById('readerNext');
+      if (!pages) return;
+
+      const list = Array.isArray(chapter.chapters) ? chapter.chapters : [];
+      const currentSlug = cleanSlug(chapter.slug || chapter.currentSlug);
+      state.reader = { slug, chapter: chapter.slug || chapter.currentSlug, list, index: list.findIndex((c) => cleanSlug(c.slug) === currentSlug) };
+      if (!Number.isInteger(state.reader.index) || state.reader.index < 0) state.reader.index = 0;
+
+      if (titleEl) titleEl.textContent = chapter.mangaTitle || chapter.title || '';
+      if (chapEl) chapEl.textContent = chapter.heading || chapter.name || '';
+      document.title = (chapter.heading || 'Reader') + ' — Hinataw.exe';
+
+      if (select) {
+        select.innerHTML = list.map((c, i) => `<option value="${i}">${esc(c.name || ('Chapter ' + c.number))}</option>`).join('');
+        select.value = String(state.reader.index);
+      }
+      if (prevBtn) prevBtn.disabled = state.reader.index <= 0;
+      if (nextBtn) nextBtn.disabled = state.reader.index >= list.length - 1;
+
+      const images = Array.isArray(chapter.images) ? chapter.images : [];
+      pages.innerHTML = `
+        <div class="m-reader-inner">
+          ${images.map((img) => `<img src="${esc(img.src)}" data-fallback="${esc(img.fallbackSrc || '')}" loading="lazy" alt="${esc(img.alt || '')}"
+                 onerror="if(this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback='';}"/>`).join('')}
+          <div class="m-reader-foot">End of chapter · ${images.length} pages</div>
+        </div>
+      `;
+    }
+
+    function readerJump(indexStr) {
+      const i = parseInt(indexStr, 10);
+      const r = state.reader;
+      if (!r || !Number.isInteger(i) || !r.list[i]) return;
+      openReader(r.slug, r.list[i].slug);
+    }
+    function readerStep(delta) {
+      const r = state.reader;
+      if (!r) return;
+      const next = r.index + delta;
+      if (!r.list[next]) return;
+      openReader(r.slug, r.list[next].slug);
+    }
+    function closeReader() {
+      state.readerReq++;
+      const overlay = document.getElementById('mangaReaderOverlay');
+      if (overlay) overlay.style.display = 'none';
+      document.title = (state.detail && state.detail.title ? state.detail.title : 'Manga') + ' — Hinataw.exe';
+    }
+
+    // ---------- Boot ----------
+    async function boot() {
+      checkAdGate();
+      renderBookmarkCount();
+      const input = document.getElementById('mSearch');
+      if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') mangaSearch(); });
+
+      // Deep link: /manga?slug=... opens the title straight away.
+      const params = new URLSearchParams(location.search);
+      const deepSlug = params.get('slug');
+
+      try {
+        const res = await fetch('/api/manga/home', { cache: 'no-store' });
+        const data = await res.json();
+        if (data && data.success && Array.isArray(data.genres) && data.genres.length) {
+          state.genres = data.genres;
+          renderGenres();
+        }
+      } catch (e) {}
+
+      if (deepSlug) {
+        openDetail(deepSlug);
+        return;
+      }
+      loadBrowse();
+    }
+
+    window.mangaSearch = mangaSearch;
+    window.mangaMode = mangaMode;
+    window.mangaPage = mangaPage;
+    window.pickGenre = pickGenre;
+    window.openDetail = openDetail;
+    window.openReader = openReader;
+    window.closeReader = closeReader;
+    window.readerStep = readerStep;
+    window.readerJump = readerJump;
+    window.backToBrowse = backToBrowse;
+    window.toggleBookmark = toggleBookmark;
+    window.showBookmarks = showBookmarks;
+    window.toggleDetailBookmark = toggleDetailBookmark;
+
+    document.addEventListener('DOMContentLoaded', boot);
+  </script>
+</body>
+</html>

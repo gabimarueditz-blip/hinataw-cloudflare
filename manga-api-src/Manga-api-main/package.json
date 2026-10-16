@@ -1,0 +1,39 @@
+{
+    "name": "mangato-api",
+    "version": "1.0.0",
+    "description": "Manga api built with Express",
+    "main": "src/api.js",
+    "type": "module",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/riimuru/Mangato-api.git"
+    },
+    "engines": {
+        "node": "16.10.0"
+    },
+    "keywords": [
+        "api",
+        "manga",
+        "comic",
+        "manwha",
+        "manhua"
+    ],
+    "author": "",
+    "license": "ISC",
+    "scripts": {
+        "start": "node src/api.js"
+    },
+    "bugs": {
+        "url": "https://github.com/riimuru/Mangato-api/issues"
+    },
+    "homepage": "https://github.com/riimuru/Mangato-api#readme",
+    "dependencies": {
+        "axios": "^0.24.0",
+        "cheerio": "^1.0.0-rc.10",
+        "cors": "^2.8.5",
+        "express": "^4.17.1"
+    },
+    "devDependencies": {
+        "nodemon": "^2.0.7"
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "hinataw-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Egress relay for the Freebuff-hosted Hinataw site (moviebox API + video CDN reject Cloudflare Workers)",
+  "engines": {
+    "node": "24.x"
+  }
+}

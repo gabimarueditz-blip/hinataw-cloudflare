@@ -1,0 +1,124 @@
+--- a/public/index.html
++++ b/public/index.html
+@@
+-  <header class="topbar">
+-    <!-- Zone 1: Hamburger & Brand Logo -->
++  <!-- Spotlight Slider (rendered above the topbar search on both desktop and mobile) -->
++  <section class="spotlight-slider-section">
++    <div class="spotlight-slide-backdrop-wrap">
++      <img class="spotlight-slide-backdrop" src="" alt=""/>
++    </div>
++    <div class="spotlight-gradient-overlay"></div>
++    <div class="spotlight-content-wrap">
++      <div class="spotlight-rank-kicker">RANK #1</div>
++      <h2 class="spotlight-title">Spotlight Anime</h2>
++      <div class="spotlight-meta-row">
++        <span class="spotlight-meta-item">12 Episodes</span>
++        <span class="spotlight-quality-badge">HD</span>
++        <span class="spotlight-sub-badge">Sub</span>
++      </div>
++      <p class="spotlight-description">Description placeholder for the spotlight slider.</p>
++      <div class="spotlight-actions">
++        <button class="spotlight-btn-watch">Watch</button>
++        <button class="spotlight-btn-detail">Details</button>
++      </div>
++    </div>
++    <div class="spotlight-nav-controls">
++      <button class="spotlight-arrow-btn" id="spotlightPrevBtn" aria-label="Previous spotlight">‹</button>
++      <button class="spotlight-arrow-btn" id="spotlightNextBtn" aria-label="Next spotlight">›</button>
++    </div>
++  </section>
+ 
+-    <!-- Spotlight Slider -->
+-    <section class="spotlight-slider-section">
+-      <div class="spotlight-slide-backdrop-wrap">
+-        <img class="spotlight-slide-backdrop" src="" alt=""/>
+-      </div>
+-      <div class="spotlight-gradient-overlay"></div>
+-      <div class="spotlight-content-wrap">
+-        <div class="spotlight-rank-kicker">RANK #1</div>
+-        <h2 class="spotlight-title">Spotlight Anime</h2>
+-        <div class="spotlight-meta-row">
+-          <span class="spotlight-meta-item">12 Episodes</span>
+-          <span class="spotlight-quality-badge">HD</span>
+-          <span class="spotlight-sub-badge">Sub</span>
+-        </div>
+-        <p class="spotlight-description">Description placeholder for the spotlight slider.</p>
+-        <div class="spotlight-actions">
+-          <button class="spotlight-btn-watch">Watch</button>
+-          <button class="spotlight-btn-detail">Details</button>
+-        </div>
+-      </div>
+-      <div class="spotlight-nav-controls">
+-        <button class="spotlight-arrow-btn" id="spotlightPrevBtn" aria-label="Previous spotlight">‹</button>
+-        <button class="spotlight-arrow-btn" id="spotlightNextBtn" aria-label="Next spotlight">›</button>
+-      </div>
+-    </section>
++  <header class="topbar">
++    <!-- Zone 1: Hamburger & Brand Logo -->
+@@
+-      <div style="position: relative; flex: 1; max-width: 440px; min-width: 200px;" class="topbar-search-mobile">
++      <div style="position: relative; flex: 1; max-width: 440px; min-width: 200px;" class="topbar-search-desktop">
+@@
+-    <!-- Zone 3: Quick Utility Links -->
+-    <div class="topbar-actions">
+-      <!-- Quick Nav Buttons -->
+-      <div class="topbar-quick-nav">
+-        <button class="quick-nav-btn" onclick="openScheduleModal()"
++    <!-- Quick Utility Links -->
++    <div class="topbar-actions">
++      <!-- Quick Nav Buttons -->
++      <div class="topbar-quick-nav">
++        <button class="quick-nav-btn" onclick="openScheduleModal()"
+@@
+-    /* Mobile search pinned to the spotlight slider bottom */
+-    .spotlight-search-mobile {
+-      display: none;
+-      position: absolute;
+-      left: 28px;
+-      bottom: 18px;
+-      z-index: 12;
+-      width: calc(100% - 56px);
+-      max-width: 420px;
+-    }
++    /* Mobile/desktop search placed below the spotlight slider */
++    .spotlight-search-below {
++      margin: 18px 0 8px;
++      max-width: 460px;
++      width: 100%;
++    }
+ 
+-    @media (max-width: 768px) {
+-      .topbar-search-mobile { display: none; }
+-      .spotlight-search-mobile {
+-        display: block;
+-      }
+-    }
++    @media (max-width: 768px) {
++      .topbar-search-desktop { display: none; }
++      .spotlight-search-below { max-width: 100%; }
++    }
+@@
+-        <span>Sponsored · a ra plhn</span>
++        <span>Sponsored · a ra plhn</span>
++  </div>
+ 
+-  </div>
++  <div class="spotlight-search-below">
++    <div style="position: relative;">
++      <div class="search-box">
++        <input type="text" id="searchInput" class="search-input" placeholder="Search anime..." autocomplete="off" oninput="handleSearchInput(this.value)" onkeydown="if(event.key==='Enter') triggerSearch()"/>
++        <button id="searchClearBtn" class="search-clear" onclick="clearSearch()" aria-label="Clear search">✕</button>
++        <button class="search-filter-btn" onclick="navigateToView('filter')" title="Advanced Filter">
++          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
++          <span>Filter</span>
++        </button>
++        <button class="search-icon-btn" onclick="triggerSearch()" aria-label="Search" title="Search">
++          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
++        </button>
++      </div>
++
++      <!-- Live Search Suggestions Dropdown -->
++      <div class="search-suggestions-dropdown" id="searchSuggestionsDropdown"></div>
++    </div>
++  </div>

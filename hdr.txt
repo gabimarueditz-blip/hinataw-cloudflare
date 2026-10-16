@@ -1,0 +1,1 @@
+hls url: /api/anime/proxy-stream?url=https%3A%2F%2Ffetch.nexabloom.top%2Fanime%2Ff899139df5e1059396431415e770c6dd%2Fb23b2bb864c4f8876052acde11c6529c%2Fmaster.m3u8%3Ftoken%3DMTc5MTIxODk5MXxmODk5MTM5ZGY1ZTEwNTkzOTY0MzE0MTVlNzcwYzZkZC9iMjNiMmJiODY0YzRmODg3NjA1MmFjZGUxMWM2NTI5Yw.mRDcceHnsWVY-Lemrnhin4mT6ijrIYmE3Laps5yw2Gc&referer=https%3A%2F%2Fmegaplay.buzz%2F
