@@ -317,13 +317,16 @@
       try { window.__adGateDetection = { blocked: hidden }; } catch (e) {}
       return hidden;
     }
+    // The ad gate was retired along with the ad networks: every third-party
+    // advertiser was stripped from this project, so demanding that readers
+    // disable their ad blocker only produced a white curtain over the manga
+    // page (and blocked opening/reading) for a revenue stream that no longer
+    // exists. checkAdGate now always passes and never shows the overlay.
     function checkAdGate() {
       const overlay = document.getElementById('adGateOverlay');
-      if (adBlockerDetected()) { if (overlay) overlay.style.display = 'flex'; return false; }
       if (overlay) overlay.style.display = 'none';
       return true;
     }
-    setInterval(checkAdGate, 4000);
 
     (function runFirstAdGateCheck() {
       try { if (document.readyState === 'loading') {

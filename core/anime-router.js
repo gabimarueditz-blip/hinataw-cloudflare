@@ -615,16 +615,17 @@ function sameShowTitle(a, b) {
  * MovieBox counterpart of a gokuhd series, with its real season/episode counts.
  * Returns { id, slug, title, image, seasons } or null when none matches.
  */
-async function findMovieboxEpisodeSource(slug) {
-  const key = String(slug || "").replace(/^goku:/, "");
-  if (!key) return null;
+async function findMovieboxEpisodeSource(slug, wantedType = "series") {
+  const base = String(slug || "").replace(/^goku:/, "");
+  if (!base) return null;
+  const key = `${base}::${wantedType}`;
   const hit = gokuEpisodeSourceIndex.get(key);
   if (hit && Date.now() - hit.at < GOKU_EPISODE_SOURCE_TTL) return hit.match;
 
   let match = null;
   try {
-    const detail = await fetchHindiDetail(key).catch(() => null);
-    const query = movieboxSearchQuery(detail?.title || key);
+    const detail = await fetchHindiDetail(base).catch(() => null);
+    const query = movieboxSearchQuery(detail?.title || base);
     if (query) {
       const results = await searchMoviebox(query).catch(() => []);
       // Only accept a candidate whose title actually is the same show. Without
@@ -633,21 +634,24 @@ async function findMovieboxEpisodeSource(slug) {
       // completely different series.
       const wanted = normalizeMatchTitle(query);
       const candidates = (results || [])
-        .filter((it) => it && it.type === "series" && it.slug)
+        .filter((it) => it && it.type === wantedType && it.slug)
         .filter((it) => sameShowTitle(normalizeMatchTitle(it.title), wanted))
         .sort(
           (a, b) => (/hindi/i.test(String(b.badge)) ? 1 : 0) - (/hindi/i.test(String(a.badge)) ? 1 : 0),
         );
       for (const candidate of candidates.slice(0, 4)) {
         const det = await fetchMovieboxDetail(candidate.slug).catch(() => null);
-        const seasons = (det?.seasons || []).filter((s) => (s.maxEp || 0) > 1 || (s.allEp || []).length > 1);
-        if (!seasons.length) continue;
+        if (!det) continue;
+        const seasons = (det.seasons || []).filter((s) => (s.maxEp || 0) > 1 || (s.allEp || []).length > 1);
+        // Films have no multi-episode seasons; only series need one to match.
+        if (wantedType === "series" && !seasons.length) continue;
         match = {
           id: String(det.id),
           slug: det.slug,
           title: det.title,
           image: det.image || candidate.image || "",
-          seasons: det.seasons,
+          seasons: det.seasons || [],
+          type: wantedType,
         };
         break;
       }
@@ -1518,9 +1522,58 @@ export async function handleAnimeApi(req, res) {
     // 1. gokuhd titles: nexdrive -> fastdl -> direct MP4 (primary playable path).
     if (requestedId.startsWith("goku:")) {
       const resolved = await resolveHindiStream(episodeId, movieId).catch(() => null);
-      if (!resolved) return indiaFail(new Error("404 not found"), "These stream links");
-      res.statusCode = 200;
-      return res.end(JSON.stringify(resolved));
+      if (resolved) {
+        res.statusCode = 200;
+        return res.end(JSON.stringify(resolved));
+      }
+
+      // goku's file hosts rotate between fastdl.* and nexdrive.*, and old posts
+      // whose drives all landed on the parked nexdrive.fit domain resolve
+      // nowhere. Before failing, bridge to MovieBox's copy of the same title —
+      // the same title matching the episode lists already use for these posts.
+      const gokuRef = /^goku:([a-z0-9-]+)(?:~S(\d{1,2}))?(?:~(\d{1,4}))?$/i.exec(requestedId);
+      const gokuSlug = gokuRef?.[1] || "";
+      const gokuSeason = Number(gokuRef?.[2]) || 0;
+      const wantsGokuMovie = Boolean(movieId) && !episodeId;
+      if (gokuSlug) {
+        const match = await findMovieboxEpisodeSource(gokuSlug, wantsGokuMovie ? "movie" : "series").catch(() => null);
+        if (match) {
+          try {
+            // Series posts are per-episode pages; MovieBox needs the real ep number.
+            let epNum = 1;
+            if (!wantsGokuMovie) {
+              const epRef = /(?:episode|ep)[\s-]*(\d{1,3})/i.exec(`${gokuSlug} ${match.title || ""}`);
+              if (epRef) epNum = Number(epRef[1]) || 1;
+            }
+            const streamData = await fetchMovieboxStream({
+              subjectId: match.id,
+              detailPath: match.slug,
+              se: wantsGokuMovie ? 0 : (gokuSeason || 1),
+              ep: wantsGokuMovie ? 0 : epNum,
+            });
+            if (streamData?.sources?.length) {
+              const streams = streamData.sources.map((s) => ({
+                url: s.url,
+                quality: s.resolution ? `${s.resolution}p` : "",
+                label: s.resolution ? `${s.resolution}p` : "MP4",
+                server: "Mirror",
+                type: "mp4",
+              }));
+              res.statusCode = 200;
+              return res.end(JSON.stringify({
+                success: true,
+                type: wantsGokuMovie ? "movie" : "episode",
+                title: match.title,
+                stream: streams[0].url,
+                streams: [streams[0]],
+                fallbacks: streams.slice(1),
+              }));
+            }
+          } catch {}
+        }
+      }
+
+      return indiaFail(new Error("404 not found"), "These stream links");
     }
 
     // 2. ToonStream episodes answer with embed players. Each candidate is
