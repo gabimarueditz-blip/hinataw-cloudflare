@@ -457,8 +457,8 @@ async function getHindiMoviesLibrary() {
   // goku catalog that answers in seconds.
   const bounded = (p, ms) =>
     Promise.race([p, new Promise((resolve) => setTimeout(() => resolve(null), ms))]).catch(() => null);
-  const [india, home, ...searches] = await Promise.all([
-    bounded(fetchIndiaCatalog({ page: 1, perPage: 100, type: "movie" }), 15000),
+  const [goku, home, ...searches] = await Promise.all([
+    bounded(fetchHindiMoviesPage(1), 15000),
     bounded(fetchMovieboxHome(), 12000),
     ...CARTOON_QUERIES.map((q) => bounded(searchMoviebox(q), 8000)),
   ]);
@@ -480,12 +480,11 @@ async function getHindiMoviesLibrary() {
     items.push(it);
   };
 
-  // Add animahd (India) movies first - these are always Hindi.
-  // The catalog was asked for movies only, so items that arrive without an
-  // explicit type (the goku /movies/ parser marks some as "unknown") are
-  // still movies — coercing keeps the row from going empty when the page
-  // markup drifts.
-  (india && india.items ? india.items : []).forEach((it) => push(it && !it.type ? { ...it, type: "movie" } : it, "animahd"));
+  // Add gokuhd's Hindi-dubbed movies first — this is the reachable catalog.
+  // The legacy animahd fetchIndiaCatalog leg is DNS-blocked on most networks
+  // and always returned null, which emptied the row whenever MovieBox also
+  // rate-limited.
+  ((goku && goku.items) || []).forEach((it) => push(it && !it.type ? { ...it, type: "movie" } : it, "goku"));
   
   // Add cartoon search results - filter to only Hindi/Indian cartoons
   // Cartoon searches return both Hindi and non-Hindi versions.
