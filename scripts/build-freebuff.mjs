@@ -31,7 +31,7 @@ try {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // --- 1. preloaded.js -------------------------------------------------------
-const PRELOAD_KEYS = ["hianime-cache", "users", "feedback"]; // NOT notices
+const PRELOAD_KEYS = ["hianime-cache", "users", "feedback", "moviebox-home-stale"]; // NOT notices
 const preloaded = {};
 for (const key of PRELOAD_KEYS) {
   const p = path.join(root, "data", key + ".json");

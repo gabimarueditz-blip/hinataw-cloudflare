@@ -451,10 +451,16 @@ async function getHindiMoviesLibrary() {
     };
   }
 
+  // Every leg is bounded: this endpoint used to hang for minutes whenever
+  // MovieBox rate-limited (its home ladder alone can run for a minute), which
+  // left the Hindi Movies row loading forever instead of falling back to the
+  // goku catalog that answers in seconds.
+  const bounded = (p, ms) =>
+    Promise.race([p, new Promise((resolve) => setTimeout(() => resolve(null), ms))]).catch(() => null);
   const [india, home, ...searches] = await Promise.all([
-    fetchIndiaCatalog({ page: 1, perPage: 100, type: "movie" }).catch(() => null),
-    fetchMovieboxHome().catch(() => null),
-    ...CARTOON_QUERIES.map((q) => searchMoviebox(q).catch(() => null)),
+    bounded(fetchIndiaCatalog({ page: 1, perPage: 100, type: "movie" }), 15000),
+    bounded(fetchMovieboxHome(), 12000),
+    ...CARTOON_QUERIES.map((q) => bounded(searchMoviebox(q), 8000)),
   ]);
 
   const items = [];
@@ -594,6 +600,7 @@ const GOKU_EPISODE_SOURCE_TTL = 60 * 60 * 1000;
 // per isolate and served when a refresh fails — a stale row beats an error
 // row, and the rejected call keeps warming the ladder in the background.
 const movieboxHomeStale = { data: null, at: 0 };
+let movieboxHomeRefreshing = false;
 const movieboxListStale = new Map(); // "tab:page" -> items
 const movieboxSearchStale = new Map(); // normalized query -> items (LRU)
 const MOVIEBOX_ENDPOINT_CAP_MS = 45000;
@@ -1745,10 +1752,36 @@ export async function handleAnimeApi(req, res) {
   };
 
   if (pathname === "/api/moviebox/home") {
+    // Stale-while-revalidate: any isolate with a recent durable copy answers
+    // instantly and lets the ladder refresh behind it (single flight). Only a
+    // cold or stale store waits on the capped upstream — and even then the
+    // last good catalog is served instead of an error row.
+    let durableHome = null;
+    try { durableHome = await readDoc("moviebox-home-stale", null); } catch {}
+    if (durableHome && durableHome.data && Date.now() - (durableHome.at || 0) < 6 * 3600 * 1000) {
+      if (!movieboxHomeRefreshing) {
+        movieboxHomeRefreshing = true;
+        Promise.race([fetchMovieboxHome(), movieboxCap(undefined, "background catalog")])
+          .then((data) => {
+            movieboxHomeStale.data = data;
+            movieboxHomeStale.at = Date.now();
+            return writeDoc("moviebox-home-stale", { at: movieboxHomeStale.at, data });
+          })
+          .catch(() => {})
+          .finally(() => { movieboxHomeRefreshing = false; });
+      }
+      res.statusCode = 200;
+      return res.end(JSON.stringify({
+        success: true,
+        ...durableHome.data,
+        cached: true,
+        staleAgeMs: Date.now() - (durableHome.at || 0),
+      }));
+    }
     // The MovieBox GET ladder (netfilm 429s -> aoneroom retries -> jina reader
     // pacing) is unbounded and can run for a minute on a cold isolate. Cap the
     // response, and when the cap or an upstream error hits, serve the last
-    // good catalog for this isolate instead of an error row.
+    // good catalog instead of an error row.
     try {
       const data = await Promise.race([fetchMovieboxHome(), movieboxCap(undefined, "catalog")]);
       movieboxHomeStale.data = data;
