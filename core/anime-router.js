@@ -753,7 +753,7 @@ export async function handleAnimeApi(req, res) {
   // Manga page images. The MangaKakalot CDN answers 403 unless the request
   // carries a mangakakalot.gg Referer, which a browser never sends for our
   // origin, so each page is relayed with the header attached.
-  if (pathname === "/api/manga/image") {
+  if (pathname === "/api/manga/image" || pathname.startsWith("/api/manga/image/")) {
     return handleMangaImage(req, res, url);
   }
 
@@ -3385,13 +3385,23 @@ async function handleDiag(req, res, url) {
 /** A manga image as a URL this API serves, or "" when there is none. */
 function mangaImageSrc(rawUrl) {
   if (!rawUrl) return "";
-  return `/api/manga/image?u=${encodeURIComponent(rawUrl)}`;
+  // Path form, not ?u= — see handleMangaImage: the edge cache ignores query
+  // strings, which let one cached image answer for every cover.
+  return `/api/manga/image/${encodeURIComponent(rawUrl)}`;
 }
 
 // Manga page relay: adds the mangakakalot.gg Referer the CDN requires and
 // streams the bytes through instead of buffering a full page.
 async function handleMangaImage(req, res, url) {
-  const target = url.searchParams.get("u") || url.searchParams.get("url") || "";
+  // The image URL rides in the PATH (/api/manga/image/<encoded>), not the
+  // query string: Cloudflare's edge cache ignores query strings by default,
+  // so one cached response — once, notoriously, MangaDex's hotlink
+  // placeholder — was served for EVERY cover on the page. Path-encoding
+  // makes each cover its own cache entry so immutable caching is safe again.
+  const pathTarget = decodeURIComponent(
+    String(url.pathname || "").replace(/^\/api\/manga\/image\/?/, ""),
+  );
+  const target = pathTarget || url.searchParams.get("u") || url.searchParams.get("url") || "";
   if (!target) {
     res.statusCode = 400;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -3403,9 +3413,13 @@ async function handleMangaImage(req, res, url) {
     res.statusCode = 200;
     res.setHeader("Content-Type", image.contentType);
     res.setHeader("Access-Control-Allow-Origin", "*");
-    // Page art is immutable per chapter, so let the browser keep it: a reader
-    // scrolls back and forth constantly and must not refetch every page.
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    // Path-form URLs vary per image, so the browser and the edge may keep them
+    // for a year (a reader scrolls back and forth constantly). The legacy
+    // ?u= form must never be cached: its edge key would collide across covers.
+    res.setHeader(
+      "Cache-Control",
+      pathTarget ? "public, max-age=31536000, immutable" : "no-store",
+    );
     if (image.contentLength) res.setHeader("Content-Length", image.contentLength);
 
     if (canStream(res) && image.stream && !isLocked(image.stream)) {

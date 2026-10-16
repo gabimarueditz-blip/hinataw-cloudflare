@@ -13591,7 +13591,7 @@ let hindiAnimeCarouselStarted = false;
       const u = String(url || '');
       if (!u) return '';
       if (u.startsWith('/')) return u;
-      return '/api/manga/image?u=' + encodeURIComponent(u);
+      return '/api/manga/image/' + encodeURIComponent(u);
     }
 
     // ---------- Home carousels ----------
