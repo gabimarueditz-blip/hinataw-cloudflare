@@ -589,6 +589,29 @@ async function getMovieboxIdMap() {
 const gokuEpisodeSourceIndex = new Map(); // slug -> { at, match }
 const GOKU_EPISODE_SOURCE_TTL = 60 * 60 * 1000;
 
+// MovieBox endpoint result caches (module scope): the upstream GET ladder is
+// slow (~90s cold) and rate-limits in waves, so the last good answer is kept
+// per isolate and served when a refresh fails — a stale row beats an error
+// row, and the rejected call keeps warming the ladder in the background.
+const movieboxHomeStale = { data: null, at: 0 };
+const movieboxListStale = new Map(); // "tab:page" -> items
+const movieboxSearchStale = new Map(); // normalized query -> items (LRU)
+const MOVIEBOX_ENDPOINT_CAP_MS = 45000;
+
+function movieboxCap(ms = MOVIEBOX_ENDPOINT_CAP_MS, label = "request") {
+  let timer;
+  const cap = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`MovieBox ${label} exceeded ${Math.round(ms / 1000)}s (cold isolate)`)),
+      ms,
+    );
+  });
+  // Clear the timer once the race settles; the derived promise swallows the
+  // losing rejection so it is never an unhandled rejection.
+  cap.finally(() => clearTimeout(timer)).catch(() => {});
+  return cap;
+}
+
 /** Strip dub/quality/season noise so the title can be used as a search query. */
 function movieboxSearchQuery(title) {
   return String(title || "")
@@ -1724,23 +1747,24 @@ export async function handleAnimeApi(req, res) {
   if (pathname === "/api/moviebox/home") {
     // The MovieBox GET ladder (netfilm 429s -> aoneroom retries -> jina reader
     // pacing) is unbounded and can run for a minute on a cold isolate. Cap the
-    // response at 15s so callers are never left hanging; the rejected call's
-    // in-flight ladder keeps warming the isolate, and the home page's phase-2
-    // retry then lands on the warm cache.
-    let capTimer;
+    // response, and when the cap or an upstream error hits, serve the last
+    // good catalog for this isolate instead of an error row.
     try {
-      const data = await Promise.race([
-        fetchMovieboxHome(),
-        new Promise((_, reject) => {
-          capTimer = setTimeout(
-            () => reject(new Error("MovieBox catalog exceeded 15s (cold isolate)")),
-            15000,
-          );
-        }),
-      ]).finally(() => clearTimeout(capTimer));
+      const data = await Promise.race([fetchMovieboxHome(), movieboxCap(undefined, "catalog")]);
+      movieboxHomeStale.data = data;
+      movieboxHomeStale.at = Date.now();
       res.statusCode = 200;
       return res.end(JSON.stringify({ success: true, ...data }));
     } catch (e) {
+      if (movieboxHomeStale.data) {
+        res.statusCode = 200;
+        return res.end(JSON.stringify({
+          success: true,
+          ...movieboxHomeStale.data,
+          stale: true,
+          staleAgeMs: Date.now() - movieboxHomeStale.at,
+        }));
+      }
       return movieboxFail(e, "Catalog");
     }
   }
@@ -1748,11 +1772,22 @@ export async function handleAnimeApi(req, res) {
   if (pathname === "/api/moviebox/list") {
     const tab = Math.max(1, parseInt(url.searchParams.get("tab") || "2", 10));
     const page = Math.max(1, parseInt(url.searchParams.get("p") || "1", 10));
+    const listKey = `${tab}:${page}`;
     try {
-      const items = await fetchMovieboxList(tab, page);
+      const items = await Promise.race([fetchMovieboxList(tab, page), movieboxCap(undefined, "list")]);
+      movieboxListStale.set(listKey, items);
+      if (movieboxListStale.size > 30) {
+        const oldest = movieboxListStale.keys().next().value;
+        if (oldest !== undefined) movieboxListStale.delete(oldest);
+      }
       res.statusCode = 200;
       return res.end(JSON.stringify({ success: true, tab, page, items }));
     } catch (e) {
+      const hit = movieboxListStale.get(listKey);
+      if (hit) {
+        res.statusCode = 200;
+        return res.end(JSON.stringify({ success: true, tab, page, items: hit, stale: true }));
+      }
       return movieboxFail(e, "Catalog list");
     }
   }
@@ -1763,11 +1798,25 @@ export async function handleAnimeApi(req, res) {
       res.statusCode = 400;
       return res.end(JSON.stringify({ success: false, error: "Missing query parameter" }));
     }
+    // Search is POST-only upstream (uncached by the GET ladder) and is the
+    // first thing the rate limiter kills; keep a small per-query LRU so a
+    // repeated query answers even while the upstream is refusing.
+    const queryKey = q.trim().toLowerCase().replace(/\s+/g, " ");
     try {
-      const items = await searchMoviebox(q);
+      const items = await Promise.race([searchMoviebox(q), movieboxCap(undefined, "search")]);
+      movieboxSearchStale.set(queryKey, items);
+      if (movieboxSearchStale.size > 12) {
+        const oldest = movieboxSearchStale.keys().next().value;
+        if (oldest !== undefined) movieboxSearchStale.delete(oldest);
+      }
       res.statusCode = 200;
       return res.end(JSON.stringify({ success: true, query: q, items }));
     } catch (e) {
+      const hit = movieboxSearchStale.get(queryKey);
+      if (hit) {
+        res.statusCode = 200;
+        return res.end(JSON.stringify({ success: true, query: q, items: hit, stale: true }));
+      }
       return movieboxFail(e, "Search");
     }
   }
