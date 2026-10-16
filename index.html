@@ -7750,15 +7750,24 @@
       try { loadMangaSections(); } catch (e) {}
 
       // Phase 2 — the MovieBox ladder answers whenever it answers (capped at
-      // 9s server-side). It only paints its own rows — plus the catalog/hero
+      // 15s server-side). It only paints its own rows — plus the catalog/hero
       // fallbacks when HiAnime was unavailable — and never blocks phase 1.
-      try {
-        const mbRes = await fetch('/api/moviebox/home', { cache: 'no-store' });
-        if (mbRes.ok) {
+      const fetchMovieboxCatalog = async () => {
+        try {
+          const mbRes = await fetch('/api/moviebox/home', { cache: 'no-store' });
+          if (!mbRes.ok) return null;
           const raw = await mbRes.json();
-          if (raw && raw.success) mbData = raw;
-        }
-      } catch (e) {}
+          return (raw && raw.success) ? raw : null;
+        } catch (e) { return null; }
+      };
+      mbData = await fetchMovieboxCatalog();
+      if (!mbData) {
+        // A cold isolate answers 502 at the server cap while its in-flight
+        // ladder keeps warming that isolate; one retry on the same connection
+        // usually lands on the warm cache.
+        await new Promise((r) => setTimeout(r, 2500));
+        mbData = await fetchMovieboxCatalog();
+      }
 
       if (mbData) {
         try {

@@ -1629,17 +1629,18 @@ export async function handleAnimeApi(req, res) {
 
   if (pathname === "/api/moviebox/home") {
     // The MovieBox GET ladder (netfilm 429s -> aoneroom retries -> jina reader
-    // pacing) is unbounded and can run for a minute on a cold isolate; the home
-    // page waits on this response, so fail fast at 9s and let the next (warm)
-    // load pick the catalog up.
+    // pacing) is unbounded and can run for a minute on a cold isolate. Cap the
+    // response at 15s so callers are never left hanging; the rejected call's
+    // in-flight ladder keeps warming the isolate, and the home page's phase-2
+    // retry then lands on the warm cache.
     let capTimer;
     try {
       const data = await Promise.race([
         fetchMovieboxHome(),
         new Promise((_, reject) => {
           capTimer = setTimeout(
-            () => reject(new Error("MovieBox catalog exceeded 9s (cold isolate)")),
-            9000,
+            () => reject(new Error("MovieBox catalog exceeded 15s (cold isolate)")),
+            15000,
           );
         }),
       ]).finally(() => clearTimeout(capTimer));
