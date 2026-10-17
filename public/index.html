@@ -2724,15 +2724,6 @@
       color: #6b7280;
       margin: 0;
     }
-    .footer-sponsor-link {
-      color: #6b7280;
-      text-decoration: underline;
-      transition: color .2s;
-    }
-    .footer-sponsor-link:hover {
-      color: var(--accent, #ff4d97);
-    }
-
     /* Generic Info Modal for Footer Links */
     .info-modal-overlay {
       position: fixed;
@@ -7049,9 +7040,6 @@
         <p class="footer-copyright">
           © Hinataw.exe. All rights reserved.
         </p>
-        <p class="footer-copyright">
-          <a href="https://uplcm.com/4/11978197" target="_blank" rel="noopener noreferrer sponsored" class="footer-sponsor-link">Sponsored</a>
-        </p>
 
       </div>
     </div>
@@ -8790,14 +8778,10 @@ let heroSwapTimer = null;
         }
         const mbSources = (data.sources || []).filter(s => s && s.url);
         currentStreams = [];
-        if (data.embedUrl) {
-          currentStreams.push({
-            server: 'Stream Player (Fast)',
-            embedUrl: data.embedUrl,
-            type: 'embed',
-            resolution: 1080,
-          });
-        }
+        // Direct MP4s lead: they play in the site's own free, open-source
+        // player (native <video> + hls.js) with no third-party ad stack.
+        // The external embed player is kept last as the failover for hosts
+        // whose egress the MovieBox CDN rejects (it carries its own ads).
         for (const s of mbSources) {
           currentStreams.push({
             server: `${s.resolution}p MP4`,
@@ -8806,6 +8790,14 @@ let heroSwapTimer = null;
             embedUrl: data.embedUrl || '',
             type: 'mp4',
             resolution: s.resolution,
+          });
+        }
+        if (data.embedUrl) {
+          currentStreams.push({
+            server: 'Stream Player (Mirror)',
+            embedUrl: data.embedUrl,
+            type: 'embed',
+            resolution: 1080,
           });
         }
         if (!currentStreams.length) {
