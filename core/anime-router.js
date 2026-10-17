@@ -542,6 +542,47 @@ async function getHindiMoviesLibrary() {
 }
 
 // ---------------------------------------------------------------------------
+// MovieBox-Hindi catalogue fallback for the Hindi grids.
+//
+// gokuhd and animahd are unreachable from some hosting providers' egress
+// (Render, Cloudflare Workers), which left /api/india/series, /movies and
+// /library — and the home page's Hindi rows — completely empty on those
+// hosts. The MovieBox API is reachable from everywhere and searching it for
+// "hindi" returns the same badge-Hindi titles, so one cached search keeps
+// the grids populated in the same item shape the UI already renders.
+// ---------------------------------------------------------------------------
+const movieboxHindiFallback = { at: 0, items: [] };
+const MOVIEBOX_HINDI_FALLBACK_TTL = 30 * 60 * 1000;
+
+async function getMovieboxHindiCatalog(type = "all") {
+  if (!movieboxHindiFallback.items.length || Date.now() - movieboxHindiFallback.at >= MOVIEBOX_HINDI_FALLBACK_TTL) {
+    const results = await searchMoviebox("hindi").catch(() => []);
+    const items = (results || [])
+      .filter((it) => it && it.slug && /hindi/i.test(String(it.badge || "")))
+      .map((it) => ({
+        id: `moviebox:${it.id}`,
+        postId: "",
+        slug: it.slug,
+        title: it.title || "",
+        rawTitle: it.title || "",
+        image: it.image || "",
+        year: String(it.year || ""),
+        rating: String(it.rating || ""),
+        quality: "",
+        type: it.type === "movie" ? "movie" : "series",
+        url: "",
+        source: "moviebox",
+      }));
+    if (items.length) {
+      movieboxHindiFallback.at = Date.now();
+      movieboxHindiFallback.items = items;
+    }
+  }
+  const items = movieboxHindiFallback.items;
+  return type === "all" ? items : items.filter((it) => it.type === type);
+}
+
+// ---------------------------------------------------------------------------
 // MovieBox id -> { slug, title, image } map.
 //
 // The Hindi rows include MovieBox's Hindi anime, whose ids are subject ids.
@@ -1163,6 +1204,21 @@ export async function handleAnimeApi(req, res) {
       movieboxHindiMovies,
     ).slice(0, 12);
 
+    // Hosts that cannot reach gokuhd/animahd (or whose MovieBox home sections
+    // carry no genre/badge metadata) still get Hindi rows from the cached
+    // MovieBox-Hindi catalogue instead of rendering two empty buckets.
+    let finalIndiaSeries = indiaSeries;
+    let finalIndiaMovies = indiaMovies;
+    if (!finalIndiaSeries.length || !finalIndiaMovies.length) {
+      const fallbackRows = await getMovieboxHindiCatalog().catch(() => []);
+      if (!finalIndiaSeries.length) {
+        finalIndiaSeries = fallbackRows.filter((it) => it.type === "series").slice(0, 12);
+      }
+      if (!finalIndiaMovies.length) {
+        finalIndiaMovies = fallbackRows.filter((it) => it.type === "movie").slice(0, 12);
+      }
+    }
+
     const topUpcomingAnimes = (syncedData.topUpcoming && syncedData.topUpcoming.length > 0)
       ? syncedData.topUpcoming.slice(0, 8)
       : [
@@ -1226,8 +1282,8 @@ export async function handleAnimeApi(req, res) {
       top10Animes,
       topUpcomingAnimes,
       // Hindi India API buckets surfaced alongside the HiAnime-powered rows.
-      indiaSeriesAnimes: indiaSeries,
-      indiaMovieAnimes: indiaMovies,
+      indiaSeriesAnimes: finalIndiaSeries,
+      indiaMovieAnimes: finalIndiaMovies,
       genres: [
         "Action", "Adventure", "Animation", "Boys Love", "Cars", "CGDCT", "Comedy", "Demons", "Detective",
         "Drama", "Ecchi", "Educational", "Fantasy", "Horror", "Isekai", "Magic", "Mecha", "Military",
@@ -1274,14 +1330,24 @@ export async function handleAnimeApi(req, res) {
           total: goku.total, totalPages: goku.totalPages,
         }));
       }
-      const list = await fetchIndiaSeries(null, { page });
-      // `total`/`totalPages` are additive so the UI can page past the first 24
-      // instead of silently stopping at whatever one request returned.
-      const totals = await fetchIndiaTotals().catch(() => ({ series: 0, movies: 0 }));
+      const list = await fetchIndiaSeries(null, { page }).catch(() => []);
+      if (list.length) {
+        // `total`/`totalPages` are additive so the UI can page past the first 24
+        // instead of silently stopping at whatever one request returned.
+        const totals = await fetchIndiaTotals().catch(() => ({ series: 0, movies: 0 }));
+        res.statusCode = 200;
+        return res.end(JSON.stringify({
+          success: true, page, series: list,
+          total: totals.series, totalPages: Math.ceil(totals.series / 24),
+        }));
+      }
+      // gokuhd/animahd unreachable from this host: serve MovieBox's Hindi
+      // catalogue in the same shape so the grid is never empty.
+      const mboxSeries = await getMovieboxHindiCatalog("series").catch(() => []);
       res.statusCode = 200;
       return res.end(JSON.stringify({
-        success: true, page, series: list,
-        total: totals.series, totalPages: Math.ceil(totals.series / 24),
+        success: true, page, series: mboxSeries,
+        total: mboxSeries.length, totalPages: Math.max(1, Math.ceil(mboxSeries.length / 24)),
       }));
     } catch (e) {
       return indiaFail(e, "Hindi series list");
@@ -1300,12 +1366,20 @@ export async function handleAnimeApi(req, res) {
           total: goku.total, totalPages: goku.totalPages,
         }));
       }
-      const list = await fetchIndiaMovies(null, { page });
-      const totals = await fetchIndiaTotals().catch(() => ({ series: 0, movies: 0 }));
+      const list = await fetchIndiaMovies(null, { page }).catch(() => []);
+      if (list.length) {
+        const totals = await fetchIndiaTotals().catch(() => ({ series: 0, movies: 0 }));
+        res.statusCode = 200;
+        return res.end(JSON.stringify({
+          success: true, page, movies: list,
+          total: totals.movies, totalPages: Math.max(1, Math.ceil(totals.movies / 24)),
+        }));
+      }
+      const mboxMovies = await getMovieboxHindiCatalog("movie").catch(() => []);
       res.statusCode = 200;
       return res.end(JSON.stringify({
-        success: true, page, movies: list,
-        total: totals.movies, totalPages: Math.max(1, Math.ceil(totals.movies / 24)),
+        success: true, page, movies: mboxMovies,
+        total: mboxMovies.length, totalPages: Math.max(1, Math.ceil(mboxMovies.length / 24)),
       }));
     } catch (e) {
       return indiaFail(e, "Hindi movies list");
@@ -1340,9 +1414,23 @@ export async function handleAnimeApi(req, res) {
           type,
         }));
       }
-      const data = await fetchIndiaCatalog({ page, perPage, type });
+      const data = await fetchIndiaCatalog({ page, perPage, type }).catch(() => null);
+      if (data && (data.items || []).length) {
+        res.statusCode = 200;
+        return res.end(JSON.stringify({ success: true, ...data }));
+      }
+      // Same fallback as /api/india/series: the MovieBox-Hindi catalogue keeps
+      // the library grid usable on hosts where gokuhd/animahd are blocked.
+      const mboxCatalog = await getMovieboxHindiCatalog(type === "series" || type === "movie" ? type : "all").catch(() => []);
       res.statusCode = 200;
-      return res.end(JSON.stringify({ success: true, ...data }));
+      return res.end(JSON.stringify({
+        success: true,
+        items: mboxCatalog.slice(0, perPage),
+        total: mboxCatalog.length,
+        totalPages: Math.max(1, Math.ceil(mboxCatalog.length / perPage)),
+        page,
+        type,
+      }));
     } catch (e) {
       res.statusCode = 502;
       return res.end(JSON.stringify({ success: false, error: "Catalogue unavailable" }));
