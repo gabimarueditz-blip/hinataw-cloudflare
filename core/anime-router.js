@@ -554,10 +554,30 @@ async function getHindiMoviesLibrary() {
 const movieboxHindiFallback = { at: 0, items: [] };
 const MOVIEBOX_HINDI_FALLBACK_TTL = 30 * 60 * 1000;
 
+// The bundled/durable home seed carries id+slug+badge for every cached
+// title and needs no upstream call, so it backs both the Hindi grids and
+// the id map on hosts where the home/search ladder is slow or blocked.
+let movieboxLibrarySeed = null;
+async function getMovieboxLibrarySeed() {
+  if (Array.isArray(movieboxLibrarySeed) && movieboxLibrarySeed.length) return movieboxLibrarySeed;
+  let lib = movieboxHomeStale && Array.isArray(movieboxHomeStale.data?.library) ? movieboxHomeStale.data.library : null;
+  if (!lib || !lib.length) {
+    try {
+      const doc = await readDoc("moviebox-home-stale", null);
+      lib = doc && Array.isArray(doc.data?.library) ? doc.data.library : null;
+    } catch { lib = null; }
+  }
+  if (Array.isArray(lib) && lib.length) {
+    movieboxLibrarySeed = lib.filter((it) => it && it.id && it.slug);
+    return movieboxLibrarySeed;
+  }
+  return [];
+}
+
 async function getMovieboxHindiCatalog(type = "all") {
   if (!movieboxHindiFallback.items.length || Date.now() - movieboxHindiFallback.at >= MOVIEBOX_HINDI_FALLBACK_TTL) {
     const results = await searchMoviebox("hindi").catch(() => []);
-    const items = (results || [])
+    let items = (results || [])
       .filter((it) => it && it.slug && /hindi/i.test(String(it.badge || "")))
       .map((it) => ({
         id: `moviebox:${it.id}`,
@@ -573,6 +593,27 @@ async function getMovieboxHindiCatalog(type = "all") {
         url: "",
         source: "moviebox",
       }));
+    // The search POST is rejected on some hosting providers' egress (Render
+    // returns an empty payload), so the bundled seed catalogue fills in.
+    if (!items.length) {
+      const seed = await getMovieboxLibrarySeed().catch(() => []);
+      items = seed
+        .filter((it) => /hindi/i.test(String(it.badge || "")) || /hindi/i.test(String(it.title || "")))
+        .map((it) => ({
+          id: `moviebox:${it.id}`,
+          postId: "",
+          slug: it.slug,
+          title: it.title || "",
+          rawTitle: it.title || "",
+          image: it.image || "",
+          year: String(it.year || ""),
+          rating: String(it.rating || ""),
+          quality: "",
+          type: it.type === "movie" ? "movie" : "series",
+          url: "",
+          source: "moviebox",
+        }));
+    }
     if (items.length) {
       movieboxHindiFallback.at = Date.now();
       movieboxHindiFallback.items = items;
@@ -619,6 +660,16 @@ async function getMovieboxIdMap() {
   const map = movieboxIdIndex.map;
   for (const [id, meta] of getSeenMovieboxSubjects()) {
     if (!map.has(id)) map.set(id, meta);
+  }
+  // The bundled seed catalogue is available before any upstream call
+  // succeeds, so cold instances resolve slugs for its titles instead of
+  // answering the India bridge with 404 while the home ladder warms.
+  const seed = await getMovieboxLibrarySeed().catch(() => []);
+  for (const it of seed) {
+    const id = String(it.id);
+    if (!map.has(id)) {
+      map.set(id, { slug: String(it.slug), title: it.title || "", image: it.image || "", type: it.type });
+    }
   }
   return map;
 }
@@ -1354,6 +1405,7 @@ export async function handleAnimeApi(req, res) {
             err,
             sample: Array.isArray(raw) && raw[0] ? { badge: raw[0].badge, type: raw[0].type, slug: raw[0].slug } : null,
             helperCached: movieboxHindiFallback.items.length,
+            seedCount: (await getMovieboxLibrarySeed().catch(() => [])).length,
           },
         }));
       }
@@ -1491,6 +1543,15 @@ export async function handleAnimeApi(req, res) {
           url: "",
         }));
       let results = mergeHindiItems(goku || [], mboxHindi);
+      if (!results.length) {
+        // goku and the MovieBox search POST are both blocked on some hosts:
+        // title-match the bundled seed catalogue so search still answers
+        // with playable Hindi titles instead of an empty array.
+        const qLower = q.toLowerCase();
+        results = (await getMovieboxHindiCatalog().catch(() => []))
+          .filter((it) => String(it.title || "").toLowerCase().includes(qLower))
+          .slice(0, 24);
+      }
       if (!results.length) {
         results = await searchIndia(null, { query: q, page }).catch(() => []);
       }
