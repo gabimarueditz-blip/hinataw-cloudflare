@@ -1,7 +1,11 @@
 node_modules/
 .env
 .env.local
-core/.cache/
+core/.cache/*
+# Bundled subject registry: id -> slug/title for every MovieBox title the
+# India bridge can play. Shipping it lets fresh deployments resolve slugs
+# (episodes/seasons/stream) before any upstream call has warmed.
+!core/.cache/moviebox-subjects.json
 providers/2dhive.js
 extractors/babastream.js
 
