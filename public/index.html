@@ -8778,10 +8778,18 @@ let heroSwapTimer = null;
         }
         const mbSources = (data.sources || []).filter(s => s && s.url);
         currentStreams = [];
-        // Direct MP4s lead: they play in the site's own free, open-source
-        // player (native <video> + hls.js) with no third-party ad stack.
-        // The external embed player is kept last as the failover for hosts
-        // whose egress the MovieBox CDN rejects (it carries its own ads).
+        // The MovieBox player leads: it runs in the viewer's own browser, so
+        // it plays on every host — including ones whose server egress the
+        // MovieBox CDN rejects for the byte relay. Direct MP4s stay behind
+        // it as same-origin mirrors for hosts where the relay works.
+        if (data.embedUrl) {
+          currentStreams.push({
+            server: 'MovieBox Player',
+            embedUrl: data.embedUrl,
+            type: 'embed',
+            resolution: 1080,
+          });
+        }
         for (const s of mbSources) {
           currentStreams.push({
             server: `${s.resolution}p MP4`,
@@ -8790,14 +8798,6 @@ let heroSwapTimer = null;
             embedUrl: data.embedUrl || '',
             type: 'mp4',
             resolution: s.resolution,
-          });
-        }
-        if (data.embedUrl) {
-          currentStreams.push({
-            server: 'Stream Player (Mirror)',
-            embedUrl: data.embedUrl,
-            type: 'embed',
-            resolution: 1080,
           });
         }
         if (!currentStreams.length) {

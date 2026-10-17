@@ -1343,6 +1343,20 @@ export async function handleAnimeApi(req, res) {
       }
       // gokuhd/animahd unreachable from this host: serve MovieBox's Hindi
       // catalogue in the same shape so the grid is never empty.
+      if (url.searchParams.get("debug")) {
+        let raw = null;
+        let err = null;
+        try { raw = await searchMoviebox("hindi"); } catch (e) { err = String((e && e.message) || e); }
+        return res.end(JSON.stringify({
+          success: true, page, series: [], total: 0, totalPages: 1,
+          debug: {
+            rawCount: Array.isArray(raw) ? raw.length : null,
+            err,
+            sample: Array.isArray(raw) && raw[0] ? { badge: raw[0].badge, type: raw[0].type, slug: raw[0].slug } : null,
+            helperCached: movieboxHindiFallback.items.length,
+          },
+        }));
+      }
       const mboxSeries = await getMovieboxHindiCatalog("series").catch(() => []);
       res.statusCode = 200;
       return res.end(JSON.stringify({
@@ -1870,11 +1884,14 @@ export async function handleAnimeApi(req, res) {
             // own browser — still plays. Keep it as the final failover target
             // so playback survives wherever the relay hop is blocked.
             if (streamData.embedUrl) {
-              streams.push({
+              // The MovieBox player leads: it loads in the viewer's own
+              // browser, so it works even where the CDN rejects this
+              // server's egress for the MP4 relay. The MP4 mirrors follow.
+              streams.unshift({
                 url: "",
                 embedUrl: streamData.embedUrl,
-                label: "Stream Player",
-                server: "Stream Player",
+                label: "MovieBox Player",
+                server: "MovieBox Player",
                 type: "embed",
               });
             }
