@@ -1768,14 +1768,29 @@ export async function handleAnimeApi(req, res) {
             se: isMovie ? 0 : seasonNum || 1,
             ep: isMovie ? 0 : episodeNum || 1,
           });
-          if (streamData?.sources?.length) {
-            const streams = streamData.sources.map((s) => ({
+          if (streamData?.sources?.length || streamData?.embedUrl) {
+            const streams = (streamData.sources || []).map((s) => ({
               url: s.url,
               quality: s.resolution ? `${s.resolution}p` : "",
               label: s.resolution ? `${s.resolution}p` : "MP4",
               server: "Mirror",
               type: "mp4",
             }));
+            // The video CDN rejects some hosting providers' egress (Render
+            // answers 426, Cloudflare Workers 427), so on those hosts every
+            // MP4 mirror dies while the embed player — loaded in the viewer's
+            // own browser — still plays. Keep it as the final failover target
+            // so playback survives wherever the relay hop is blocked.
+            if (streamData.embedUrl) {
+              streams.push({
+                url: "",
+                embedUrl: streamData.embedUrl,
+                label: "Stream Player",
+                server: "Stream Player",
+                type: "embed",
+              });
+            }
+            if (!streams.length) return indiaFail(new Error("404 not found"), "These stream links");
             // One player, best quality first: the other resolutions stay as
             // silent fallbacks instead of a server list to choose from.
             res.statusCode = 200;
@@ -1783,7 +1798,7 @@ export async function handleAnimeApi(req, res) {
               success: true,
               type: isMovie ? "movie" : "episode",
               title: entry.title,
-              stream: streams[0].url,
+              stream: streams[0].embedUrl || streams[0].url,
               streams: [streams[0]],
               fallbacks: streams.slice(1),
             }));

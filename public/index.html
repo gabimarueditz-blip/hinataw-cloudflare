@@ -11809,7 +11809,10 @@ let hindiAnimeCarouselStarted = false;
 
       video.onerror = () => {
         console.warn('Native video error, attempting mirror failover...');
-        failoverNextServer();
+        // Route through playerFailover, not failoverNextServer: when every
+        // mirror has been tried (e.g. a CDN that rejects this host's egress)
+        // the click-to-play overlay appears instead of the spinner hanging.
+        playerFailover('This server could not start — trying the next mirror...');
       };
 
       // MovieBox MP4 relay / plain progressive MP4: hls.js cannot demux
