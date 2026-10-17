@@ -464,6 +464,7 @@ function getSyncedAnimeByLetter(char) {
 }
 
 //#endregion
+try { loadHiAnimeCacheFromDisk(); } catch {}
 export {
 	getSyncedAnimeByLetter,
 	getSyncedHiAnimeData,

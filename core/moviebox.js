@@ -560,12 +560,25 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
       direct: s.url,
     }))
     .sort((a, b) => b.resolution - a.resolution);
+  // Fallback to embedUrl if no direct MP4 sources are present
+  if (!sources.length && embedUrl) {
+    sources.push({
+      resolution: 0,
+      format: "EMBED",
+      size: 0,
+      url: embedUrl,
+      direct: embedUrl,
+    });
+  }
+
+  const embedUrl = `${domains[0] || PLAYER_DEFAULT}/spa/videoPlayPage/movies/${path}?id=${id}&type=/movie/detail&detailSe=${numSe}&detailEp=${numEp}&lang=en`;
 
   return {
     hasResource: Boolean(data.hasResource),
     limited: Boolean(data.limited),
     freeEpisodes: data.freeNum,
     sources,
+    embedUrl,
   };
 }
 

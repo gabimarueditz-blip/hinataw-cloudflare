@@ -8772,7 +8772,8 @@ let heroSwapTimer = null;
 
       if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
 
-      try {        const mb = anime.moviebox;
+      try {
+        const mb = anime.moviebox;
         const map = (mb.epMap && mb.epMap.length) ? mb.epMap : [{ se: 1, ep: 1 }];
         const target = map[Math.min(Math.max(episode, 1), map.length) - 1];
         const q = new URLSearchParams({
@@ -8782,18 +8783,36 @@ let heroSwapTimer = null;
           ep: String(target.ep),
         });
         const res = await fetch(`/api/moviebox/stream?${q.toString()}`, { cache: 'no-store' });
+        if (!res.ok) {
+          loaderText.textContent = 'Playback is preparing. Please retry in a moment.';
+          return;
+        }
         const data = await res.json();
-        if (!data.success || !data.sources || !data.sources.length) {
+        if (!data.success || (!data.sources?.length && !data.embedUrl)) {
           loaderText.textContent = 'No stream available for this episode.';
           return;
         }
-        // The provider name stays out of the UI: cards show the resolution only.
-        // MovieBox returns MP4 sources (1080p/720p/360p), not HLS://.  The
-        // player core treats .mp4 as a progressive stream, so normalize the
-        // MovieBox payload into the player's stream object shape before
-        // handing it to playStream()/playHls().
-        const mbSources = data.sources.filter(s => s && s.url);
-        if (!mbSources.length) {
+        const mbSources = (data.sources || []).filter(s => s && s.url);
+        currentStreams = [];
+        if (data.embedUrl) {
+          currentStreams.push({
+            server: 'Stream Player (Fast)',
+            embedUrl: data.embedUrl,
+            type: 'embed',
+            resolution: 1080,
+          });
+        }
+        for (const s of mbSources) {
+          currentStreams.push({
+            server: `${s.resolution}p MP4`,
+            url: s.url,
+            direct: s.direct,
+            embedUrl: data.embedUrl || '',
+            type: 'mp4',
+            resolution: s.resolution,
+          });
+        }
+        if (!currentStreams.length) {
           loaderText.textContent = 'No stream available for this episode.';
           return;
         }

@@ -592,7 +592,7 @@ async function getMovieboxIdMap() {
 // already reach, so match by title and offer its seasons instead.
 // ---------------------------------------------------------------------------
 const gokuEpisodeSourceIndex = new Map(); // slug -> { at, match }
-const GOKU_EPISODE_SOURCE_TTL = 60 * 60 * 1000;
+const GOKU_EPISODE_SOURCE_TTL = 10 * 60 * 1000;
 
 // MovieBox endpoint result caches (module scope): the upstream GET ladder is
 // slow (~90s cold) and rate-limits in waves, so the last good answer is kept
@@ -602,7 +602,7 @@ const movieboxHomeStale = { data: null, at: 0 };
 let movieboxHomeRefreshing = false;
 const movieboxListStale = new Map(); // "tab:page" -> items
 const movieboxSearchStale = new Map(); // normalized query -> items (LRU)
-const MOVIEBOX_ENDPOINT_CAP_MS = 45000;
+const MOVIEBOX_ENDPOINT_CAP_MS = 15000;
 
 function movieboxCap(ms = MOVIEBOX_ENDPOINT_CAP_MS, label = "request") {
   let timer;
@@ -650,8 +650,9 @@ function sameShowTitle(a, b) {
   if (!a || !b) return false;
   if (a === b) return true;
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  if (short.length < 4) return false;
-  return long.startsWith(short) && long.length - short.length <= 28;
+  // Be more lenient: allow title matching with diff up to 50 chars and min length of 2
+  if (short.length < 2) return false;
+  return long.startsWith(short) && long.length - short.length <= 50;
 }
 
 /**
@@ -711,7 +712,18 @@ async function findMovieboxEpisodeSource(slug, wantedType = "series") {
 // episode with several embed servers, versus gokuhd's single season pack.
 // ---------------------------------------------------------------------------
 const gokuToonSourceIndex = new Map(); // slug -> { at, match }
-const GOKU_TOON_SOURCE_TTL = 60 * 60 * 1000;
+const GOKU_TOON_SOURCE_TTL = 10 * 60 * 1000;
+
+function extractCoreAnimeTitle(raw) {
+  return String(raw || "")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\b(?:season[\s-]*\d+|s\d+|part[\s-]*\d+|episode[\s-]*\d+|ep[\s-]*\d+)[\s\S]*$/i, "")
+    .replace(/\b(?:hindi|dubbed|dub|org|dual|audio|multi|web|dl|bluray|hd|1080p|720p)[\s\S]*$/i, "")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 async function findToonstreamForGoku(slug) {
   const key = String(slug || "").replace(/^goku:/, "");
@@ -722,7 +734,15 @@ async function findToonstreamForGoku(slug) {
   let match = null;
   try {
     const detail = await fetchHindiDetail(key).catch(() => null);
-    match = await findToonstreamSeries(detail?.title || key.replace(/-/g, " ")).catch(() => null);
+    const rawQuery = detail?.title || key.replace(/-/g, " ");
+    const coreQuery = extractCoreAnimeTitle(rawQuery);
+    if (coreQuery) {
+      match = await findToonstreamSeries(coreQuery).catch(() => null);
+    }
+    if (!match) {
+      const cleanQuery = movieboxSearchQuery(rawQuery);
+      match = await findToonstreamSeries(cleanQuery || rawQuery).catch(() => null);
+    }
   } catch {}
   gokuToonSourceIndex.set(key, { at: Date.now(), match });
   return match;
@@ -1595,9 +1615,12 @@ export async function handleAnimeApi(req, res) {
 
     const requestedId = String(episodeId || movieId).trim();
 
-    // 1. gokuhd titles: nexdrive -> fastdl -> direct MP4 (primary playable path).
+    // 1. gokuhd titles: nexdrive -> fastdl -> direct MP4 (primary playable path with quick cap).
     if (requestedId.startsWith("goku:")) {
-      const resolved = await resolveHindiStream(episodeId, movieId).catch(() => null);
+      const resolved = await Promise.race([
+        resolveHindiStream(episodeId, movieId),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3500)),
+      ]).catch(() => null);
       if (resolved) {
         res.statusCode = 200;
         return res.end(JSON.stringify(resolved));
@@ -1609,70 +1632,85 @@ export async function handleAnimeApi(req, res) {
       // the same title matching the episode lists already use for these posts.
       const gokuRef = /^goku:([a-z0-9-]+)(?:~S(\d{1,2}))?(?:~(\d{1,4}))?$/i.exec(requestedId);
       const gokuSlug = gokuRef?.[1] || "";
-      const gokuSeason = Number(gokuRef?.[2]) || 0;
+      const gokuSeason = Number(gokuRef?.[2]) || 1;
+      const gokuEpParam = gokuRef?.[3] ? Number(gokuRef[3]) : null;
       const wantsGokuMovie = Boolean(movieId) && !episodeId;
-      if (gokuSlug) {
-        const match = await findMovieboxEpisodeSource(gokuSlug, wantsGokuMovie ? "movie" : "series").catch(() => null);
-        if (match) {
-          try {
-            // Series posts are per-episode pages; MovieBox needs the real ep number.
-            let epNum = 1;
-            if (!wantsGokuMovie) {
-              const epRef = /(?:episode|ep)[\s-]*(\d{1,3})/i.exec(`${gokuSlug} ${match.title || ""}`);
-              if (epRef) epNum = Number(epRef[1]) || 1;
-            }
-            const streamData = await fetchMovieboxStream({
-              subjectId: match.id,
-              detailPath: match.slug,
-              se: wantsGokuMovie ? 0 : (gokuSeason || 1),
-              ep: wantsGokuMovie ? 0 : epNum,
-            });
-            if (streamData?.sources?.length) {
-              const streams = streamData.sources.map((s) => ({
-                url: s.url,
-                quality: s.resolution ? `${s.resolution}p` : "",
-                label: s.resolution ? `${s.resolution}p` : "MP4",
-                server: "Mirror",
-                type: "mp4",
-              }));
-              res.statusCode = 200;
-              return res.end(JSON.stringify({
-                success: true,
-                type: wantsGokuMovie ? "movie" : "episode",
-                title: match.title,
-                stream: streams[0].url,
-                streams: [streams[0]],
-                fallbacks: streams.slice(1),
-              }));
-            }
-          } catch {}
+
+      let epNum = 1;
+      if (!wantsGokuMovie) {
+        if (gokuEpParam !== null && gokuEpParam > 0) {
+          epNum = gokuEpParam;
+        } else {
+          const epInName = /(?:episode|ep)[\s-]*(\d{1,3})/i.exec(requestedId);
+          if (epInName) epNum = Number(epInName[1]) || 1;
         }
       }
 
-      // Third net: ToonStream, a separate episode-wise Hindi source that keeps
-      // answering when goku removed a post and MovieBox has no copy (its
-      // upstream also rate-limits in waves). Only used when the id names a
-      // real episode — season-pack ids carry no episode number, and guessing
-      // one would play the wrong episode.
-      if (!wantsGokuMovie) {
-        const epInName = /(?:episode|ep)[\s-]*(\d{1,3})/i.exec(requestedId);
-        if (epInName) {
+      // Fast net: ToonStream (fully accessible and fast from Cloudflare Workers for series and movies).
+      if (gokuSlug) {
+        try {
           const toon = await findToonstreamForGoku(gokuSlug).catch(() => null);
           if (toon?.slug) {
-            const pick = await fetchBestToonstreamServer(toon.slug, gokuSeason || 1, Number(epInName[1])).catch(() => null);
+            const pick = await fetchBestToonstreamServer(toon.slug, wantsGokuMovie ? 1 : (gokuSeason || 1), epNum).catch(() => null);
             if (pick?.primary) {
               res.statusCode = 200;
               return res.end(JSON.stringify({
                 success: true,
-                type: "episode",
+                type: wantsGokuMovie ? "movie" : "episode",
                 title: toon.title,
-                season: gokuSeason || 1,
-                episode: Number(epInName[1]),
+                season: wantsGokuMovie ? 1 : (gokuSeason || 1),
+                episode: epNum,
                 stream: pick.primary.embedUrl,
                 streams: [{ url: "", embedUrl: pick.primary.embedUrl, server: "Mirror", type: "embed" }],
               }));
             }
           }
+        } catch {}
+      }
+
+      // Second net: MovieBox (with timeout cap & embed support)
+      if (gokuSlug) {
+        const match = await findMovieboxEpisodeSource(gokuSlug, wantsGokuMovie ? "movie" : "series").catch(() => null);
+        if (match) {
+          try {
+            const streamPromise = fetchMovieboxStream({
+              subjectId: match.id,
+              detailPath: match.slug,
+              se: wantsGokuMovie ? 0 : gokuSeason,
+              ep: wantsGokuMovie ? 0 : epNum,
+            });
+            const streamData = await Promise.race([
+              streamPromise,
+              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
+            ]).catch(() => null);
+            if (streamData?.sources?.length || streamData?.embedUrl) {
+              const streams = (streamData.sources || []).map((s) => ({
+                url: s.url,
+                quality: s.resolution ? `${s.resolution}p` : "",
+                label: s.resolution ? `${s.resolution}p` : "MP4",
+                server: "Mirror",
+                type: "mp4",
+                embedUrl: streamData.embedUrl || "",
+              }));
+              if (streamData.embedUrl) {
+                streams.unshift({
+                  url: "",
+                  embedUrl: streamData.embedUrl,
+                  server: "Mirror (Stream)",
+                  type: "embed",
+                });
+              }
+              res.statusCode = 200;
+              return res.end(JSON.stringify({
+                success: true,
+                type: wantsGokuMovie ? "movie" : "episode",
+                title: match.title,
+                stream: streams[0].embedUrl || streams[0].url,
+                streams: [streams[0]],
+                fallbacks: streams.slice(1),
+              }));
+            }
+          } catch {}
         }
       }
 
@@ -1784,20 +1822,19 @@ export async function handleAnimeApi(req, res) {
   };
 
   if (pathname === "/api/moviebox/home") {
-    // Stale-while-revalidate: any isolate with a recent durable copy answers
-    // instantly and lets the ladder refresh behind it (single flight). Only a
-    // cold or stale store waits on the capped upstream — and even then the
-    // last good catalog is served instead of an error row.
+    // Instant response with background revalidation: return durable catalog immediately.
     let durableHome = null;
     try { durableHome = await readDoc("moviebox-home-stale", null); } catch {}
-    if (durableHome && durableHome.data && Date.now() - (durableHome.at || 0) < 6 * 3600 * 1000) {
-      if (!movieboxHomeRefreshing) {
+    if (durableHome && durableHome.data) {
+      if (!movieboxHomeRefreshing && Date.now() - (durableHome.at || 0) > 6 * 3600 * 1000) {
         movieboxHomeRefreshing = true;
-        Promise.race([fetchMovieboxHome(), movieboxCap(undefined, "background catalog")])
+        Promise.race([fetchMovieboxHome(), movieboxCap(15000, "background catalog")])
           .then((data) => {
-            movieboxHomeStale.data = data;
-            movieboxHomeStale.at = Date.now();
-            return writeDoc("moviebox-home-stale", { at: movieboxHomeStale.at, data });
+            if (data) {
+              movieboxHomeStale.data = data;
+              movieboxHomeStale.at = Date.now();
+              return writeDoc("moviebox-home-stale", { at: movieboxHomeStale.at, data });
+            }
           })
           .catch(() => {})
           .finally(() => { movieboxHomeRefreshing = false; });
@@ -1889,36 +1926,45 @@ export async function handleAnimeApi(req, res) {
       res.statusCode = 400;
       return res.end(JSON.stringify({ success: false, error: "Missing query parameter" }));
     }
-    // Search is POST-only upstream (uncached by the GET ladder) and is the
-    // first thing the rate limiter kills; keep a small per-query LRU so a
-    // repeated query answers even while the upstream is refusing.
     const queryKey = q.trim().toLowerCase().replace(/\s+/g, " ");
+    let items = [];
     try {
-      const items = await Promise.race([searchMoviebox(q), movieboxCap(undefined, "search")]);
+      items = await Promise.race([searchMoviebox(q), movieboxCap(3000, "search")]).catch(() => []);
+    } catch {}
+
+    if (!items || !items.length) {
+      const hit = movieboxSearchStale.get(queryKey);
+      if (hit && hit.length) items = hit;
+    }
+
+    if (!items || !items.length) {
+      let lib = movieboxHomeStale?.data?.library || [];
+      if (!lib.length) {
+        try {
+          const durable = await readDoc("moviebox-home-stale", null);
+          if (durable && durable.data && Array.isArray(durable.data.library)) {
+            lib = durable.data.library;
+          }
+        } catch {}
+      }
+      if (lib.length) {
+        items = lib.filter((it) => {
+          const t = String(it.title || "").toLowerCase();
+          return t.includes(queryKey);
+        });
+      }
+    }
+
+    if (items && items.length) {
       movieboxSearchStale.set(queryKey, items);
-      if (movieboxSearchStale.size > 12) {
+      if (movieboxSearchStale.size > 20) {
         const oldest = movieboxSearchStale.keys().next().value;
         if (oldest !== undefined) movieboxSearchStale.delete(oldest);
       }
-      writeDoc("moviebox-search-last", { q: queryKey, at: Date.now(), items }).catch(() => {});
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ success: true, query: q, items }));
-    } catch (e) {
-      const hit = movieboxSearchStale.get(queryKey);
-      if (hit) {
-        res.statusCode = 200;
-        return res.end(JSON.stringify({ success: true, query: q, items: hit, stale: true }));
-      }
-      try {
-        const durable = await readDoc("moviebox-search-last", null);
-        if (durable && durable.q === queryKey && durable.items) {
-          movieboxSearchStale.set(queryKey, durable.items);
-          res.statusCode = 200;
-          return res.end(JSON.stringify({ success: true, query: q, items: durable.items, stale: true }));
-        }
-      } catch {}
-      return movieboxFail(e, "Search");
     }
+
+    res.statusCode = 200;
+    return res.end(JSON.stringify({ success: true, query: q, items: items || [] }));
   }
 
   if (pathname === "/api/moviebox/detail") {
@@ -1951,7 +1997,7 @@ export async function handleAnimeApi(req, res) {
     }
     try {
       const data = await fetchMovieboxStream({ subjectId, detailPath, se, ep });
-      if (!data || !data.sources.length) {
+      if (!data || (!data.sources?.length && !data.embedUrl)) {
         res.statusCode = 200;
         return res.end(JSON.stringify({ success: false, hasResource: false, error: "No stream for this episode" }));
       }
@@ -1980,11 +2026,23 @@ export async function handleAnimeApi(req, res) {
     }));
   }
 
-  // 2. Search Endpoint
+  // 2. Search Endpoint (AniList + HiAnime/9Anime Synced Catalog)
   if (pathname === "/api/anime/search") {
     const q = url.searchParams.get("q") || "";
     try {
-      const results = await searchAnime(q);
+      const [anilistResults, syncedResults] = await Promise.all([
+        searchAnime(q).catch(() => []),
+        Promise.resolve(searchSyncedAnime(q)).catch(() => [])
+      ]);
+      const seen = new Set();
+      const results = [];
+      for (const item of [...anilistResults, ...syncedResults]) {
+        const idKey = String(item.id || item.hianimeId || item.title?.english || item.titleStr || "");
+        if (idKey && !seen.has(idKey)) {
+          seen.add(idKey);
+          results.push(item);
+        }
+      }
       res.statusCode = 200;
       return res.end(JSON.stringify({ query: q, count: results.length, results }));
     } catch (err) {

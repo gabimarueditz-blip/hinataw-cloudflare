@@ -8772,7 +8772,8 @@ let heroSwapTimer = null;
 
       if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
 
-      try {        const mb = anime.moviebox;
+      try {
+        const mb = anime.moviebox;
         const map = (mb.epMap && mb.epMap.length) ? mb.epMap : [{ se: 1, ep: 1 }];
         const target = map[Math.min(Math.max(episode, 1), map.length) - 1];
         const q = new URLSearchParams({
@@ -8783,27 +8784,35 @@ let heroSwapTimer = null;
         });
         const res = await fetch(`/api/moviebox/stream?${q.toString()}`, { cache: 'no-store' });
         const data = await res.json();
-        if (!data.success || !data.sources || !data.sources.length) {
+        if (!data.success || (!data.sources?.length && !data.embedUrl)) {
           loaderText.textContent = 'No stream available for this episode.';
           return;
         }
-        // The provider name stays out of the UI: cards show the resolution only.
-        // MovieBox returns MP4 sources (1080p/720p/360p), not HLS://.  The
-        // player core treats .mp4 as a progressive stream, so normalize the
-        // MovieBox payload into the player's stream object shape before
-        // handing it to playStream()/playHls().
-        const mbSources = data.sources.filter(s => s && s.url);
-        if (!mbSources.length) {
+        const mbSources = (data.sources || []).filter(s => s && s.url);
+        currentStreams = [];
+        if (data.embedUrl) {
+          currentStreams.push({
+            server: 'Stream Player (Fast)',
+            embedUrl: data.embedUrl,
+            type: 'embed',
+            resolution: 1080,
+          });
+        }
+        for (const s of mbSources) {
+          currentStreams.push({
+            server: `${s.resolution}p MP4`,
+            url: s.url,
+            direct: s.direct,
+            embedUrl: data.embedUrl || '',
+            type: 'mp4',
+            resolution: s.resolution,
+          });
+        }
+        if (!currentStreams.length) {
           loaderText.textContent = 'No stream available for this episode.';
           return;
         }
 
-        // Some catalogue entries exist only as a trailer: MovieBox answers the
-        // play call for them with the teaser file itself, whose length is
-        // identical to the subject's own trailer (Spider-Man: Brand New Day
-        // serves 2:37 for both). Compare the media we are about to play against
-        // the trailer length so the page can say "trailer only" instead of
-        // presenting a 2-minute teaser as the movie.
         if (mb.trailerDuration) {
           video.addEventListener('loadedmetadata', function checkTrailerOnly() {
             if (Math.abs((video.duration || 0) - mb.trailerDuration) <= 3) {
@@ -8811,12 +8820,6 @@ let heroSwapTimer = null;
             }
           }, { once: true });
         }
-        currentStreams = mbSources.map(s => ({
-          server: `${s.resolution}p`,
-          url: s.url,
-          type: 'mp4',
-          resolution: s.resolution,
-        }));
         updateServerDropdown(currentStreams);
         playStream(currentStreams[0]);
       } catch (err) {
@@ -9480,31 +9483,28 @@ let heroSwapTimer = null;
           renderIndiaSeasonPills(seasonNumber ?? options[activeEp - 1]?.season);
         }
 
-        const embedOnly = streams.every((s) => !(s.url || s.stream) && s.embedUrl);
-        const toStreamEntry = (s, hidden) => ({
-          server: s.label || s.server || (s.quality ? `${s.quality}` : 'Auto'),
-          url: s.url || s.stream || '',
-          embedUrl: s.embedUrl || '',
-          type: s.embedUrl ? 'embed' : 'mp4',
-          resolution: s.quality || '',
-          hidden: Boolean(hidden)
-        });
-        // Exactly one selectable player: the server the API already verified.
-        // Any alternates it sent ride along as hidden failover targets.
+        const toStreamEntry = (s, hidden) => {
+          const isEmbed = Boolean(s.embedUrl) || s.type === 'embed' || String(s.url || s.stream || '').includes('/embed') || String(s.url || s.stream || '').includes('/e/') || String(s.url || s.stream || '').includes('/spa/');
+          const embedUrl = s.embedUrl || (isEmbed ? (s.url || s.stream || '') : '');
+          const directUrl = isEmbed ? '' : (s.url || s.stream || '');
+          return {
+            server: s.label || s.server || (s.quality ? `${s.quality}` : (isEmbed ? 'Stream Player' : 'Auto')),
+            url: directUrl,
+            embedUrl: embedUrl,
+            type: isEmbed ? 'embed' : 'mp4',
+            resolution: s.quality || '',
+            hidden: Boolean(hidden)
+          };
+        };
         currentStreams = [
           ...streams.map((s) => toStreamEntry(s, false)),
           ...((json.fallbacks || []).map((s) => toStreamEntry(s, true)))
         ];
         updateServerDropdown(currentStreams);
-
-        // Embed servers play in the iframe; direct files go straight to the
-        // video element through the India relay (no HiAnime re-resolution).
-        if (embedOnly) {
+        if (currentStreams.length) {
           playStream(currentStreams[0]);
-        } else if (streamUrl) {
-          loadStream('india-' + (ids.episodeId || ids.movieId || 'title'), 1, currentAudio, null, streamUrl);
         } else {
-          playStream(currentStreams[0]);
+          showToastNotification('No playable link found.');
         }
       } catch (e) {
         showToastNotification('Failed to load stream links.');
@@ -11805,6 +11805,11 @@ let hindiAnimeCarouselStarted = false;
           });
         }
         navigateEpisode(1);
+      };
+
+      video.onerror = () => {
+        console.warn('Native video error, attempting mirror failover...');
+        failoverNextServer();
       };
 
       // MovieBox MP4 relay / plain progressive MP4: hls.js cannot demux
@@ -14322,23 +14327,24 @@ let hindiAnimeCarouselStarted = false;
 
       searchDebounceTimer = setTimeout(async () => {
         try {
-          // Suggestions come from both catalogs: HiAnime entries open the
-          // player, MovieBox entries open their own detail/player.
-          const [hiRes, mbRes] = await Promise.all([
+          // Suggestions come from all catalogs: HiAnime/9Anime, MovieBox, and Hindi Anime
+          const [hiRes, mbRes, indiaRes] = await Promise.all([
             fetch(`/api/anime/search?q=${encodeURIComponent(q)}`).catch(() => null),
             fetch(`/api/moviebox/search?q=${encodeURIComponent(q)}`).catch(() => null),
+            fetch(`/api/india/search?q=${encodeURIComponent(q)}`).catch(() => null),
           ]);
           const hiData = hiRes && hiRes.ok ? await hiRes.json().catch(() => null) : null;
           const mbData = mbRes && mbRes.ok ? await mbRes.json().catch(() => null) : null;
-          // Same rule as the full results: a duplicate appears once, from MovieBox.
+          const indiaData = indiaRes && indiaRes.ok ? await indiaRes.json().catch(() => null) : null;
           const merged = dedupeCatalogs(
             (hiData && hiData.results) || [],
             (mbData && (mbData.items || mbData.results)) || []
           );
-          const hiItems = merged.hi.slice(0, 4);
-          const mbItems = merged.mb.slice(0, 4);
+          const hiItems = merged.hi.slice(0, 3);
+          const mbItems = merged.mb.slice(0, 3);
+          const indiaItems = ((indiaData && indiaData.results) || []).slice(0, 3);
 
-          if (hiItems.length === 0 && mbItems.length === 0) {
+          if (hiItems.length === 0 && mbItems.length === 0 && indiaItems.length === 0) {
             dropdown.innerHTML = `<div style="padding: 12px; font-size: 12px; color: #9ca3af; text-align: center;">No anime found for "${escapeHtml(q)}"</div>`;
             dropdown.style.display = 'block';
             return;
@@ -14380,6 +14386,28 @@ let hindiAnimeCarouselStarted = false;
                     <span>${item.year || '—'}</span>
                     <span>·</span>
                     <span>${kind === 'movie' ? 'Movie' : 'Series'}</span>
+                    ${item.rating ? `
+                    <span>·</span>
+                    <span style="color: #ffbade;">⭐ ${escapeHtml(String(item.rating))}</span>` : ''}
+                  </div>
+                </div>
+              </div>
+            `;
+          });
+          indiaItems.forEach(item => {
+            const title = item.title || 'Untitled';
+            const poster = item.image || item.cover || '';
+            const kind = item.type === 'movie' ? 'movie' : 'series';
+            const idAttr = String(item.id || item.slug || '').replace(/[^a-zA-Z0-9\-_:~.]/g, '');
+            html += `
+              <div class="suggestion-item" onclick="openIndiaDetail('${idAttr}', '${kind}', this.getAttribute('data-title'))" data-title="${escapeHtml(title)}">
+                <img src="${poster}" class="suggestion-thumb" alt="${escapeHtml(title)}" onerror="handleImgError(this)"/>
+                <div class="suggestion-info">
+                  <div class="suggestion-title">${escapeHtml(title)}</div>
+                  <div class="suggestion-sub">
+                    <span>${item.year || '—'}</span>
+                    <span>·</span>
+                    <span style="color: #f59e0b;">Hindi ${kind === 'movie' ? 'Movie' : 'Anime'}</span>
                     ${item.rating ? `
                     <span>·</span>
                     <span style="color: #ffbade;">⭐ ${escapeHtml(String(item.rating))}</span>` : ''}
