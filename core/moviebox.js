@@ -623,9 +623,29 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
   };
 }
 
-// Relay a CDN range request with the Referer the CDN demands.
+// Relay a CDN range request through this same-origin proxy.
 // Only hosts we resolved ourselves are allowed (no open proxy).
 const ALLOWED_CDN_HOSTS = /(\.hakunaymatata\.com|\.aoneroom\.com|\.moviebox\.ph)$/i;
+
+// The video CDN filters on the client, not on our IP: it wants an app-style
+// User-Agent *and* the moviebox.ph Referer. A browser UA is answered 428 (the
+// paywall gate the web player trips), and either header on its own earns a 429
+// from nginx, while okhttp + Referer returns 206 video/mp4 with a valid
+// Content-Range. Verified from Render's own egress through /api/diag and
+// against both bcdn / bcdnxw hosts, so playback is relayed looking like the
+// mobile app. Extra profiles stay as failover in case one host tightens up.
+const CDN_HEADER_PROFILES = [
+  {
+    "User-Agent": "okhttp/4.12.0",
+    Referer: `${SITE}/`,
+    Origin: SITE,
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+  },
+  { "User-Agent": "okhttp/4.12.0", Accept: "*/*" },
+  { "User-Agent": "node", Accept: "*/*" },
+];
+const CDN_RETRY_STATUS = new Set([403, 426, 428, 429, 451]);
 
 export async function relayMovieboxVideo(req, res, url) {
   const target = url.searchParams.get("u");
@@ -646,26 +666,58 @@ export async function relayMovieboxVideo(req, res, url) {
     return res.end("Host not allowed");
   }
 
-  const headers = {
-    "User-Agent": UA,
-    Referer: `${SITE}/`,
-    Origin: SITE,
-    Accept: "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-  };
-  if (req.headers.range) headers.Range = req.headers.range;
+  let upstream = null;
+  let lastStatus = 0;
+  let lastErr = null;
+  for (const profile of CDN_HEADER_PROFILES) {
+    const headers = { ...profile };
+    if (req.headers.range) headers.Range = req.headers.range;
+    try {
+      const r = await fetch(viaRelay(parsed.toString()), {
+        headers,
+        signal: AbortSignal.timeout(60000),
+      });
+      if (r.status === 200 || r.status === 206 || r.status === 416) {
+        upstream = r;
+        break;
+      }
+      lastStatus = r.status;
+      // A real answer about the file (404/410/…) is passed through: retrying
+      // another UA would only repeat it. Gate/lockout statuses are retried.
+      if (!CDN_RETRY_STATUS.has(r.status)) {
+        upstream = r;
+        break;
+      }
+      try { await r.body?.cancel(); } catch {}
+    } catch (err) {
+      lastErr = err;
+    }
+  }
 
+  if (!upstream) {
+    if (!res.headersSent) {
+      res.statusCode = lastStatus || 502;
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.end(
+        lastErr && !lastStatus
+          ? `Upstream error: ${lastErr.message}`
+          : `CDN declined the request (${lastStatus || "unreachable"})`
+      );
+    }
+    try { res.end(); } catch {}
+    return;
+  }
+
+  const ok = upstream.status === 200 || upstream.status === 206;
   try {
-    const upstream = await fetch(viaRelay(parsed.toString()), {
-      headers,
-      signal: AbortSignal.timeout(60000),
-    });
-
     res.statusCode = upstream.status;
-    res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || (ok ? "video/mp4" : "text/plain; charset=utf-8"));
     res.setHeader("Accept-Ranges", upstream.headers.get("accept-ranges") || "bytes");
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "public, max-age=3600");
+    // Never let a browser or proxy cache a gate answer: a cached 428 would
+    // outlive the episode link and keep "failing" after the CDN recovers.
+    res.setHeader("Cache-Control", ok ? "public, max-age=3600" : "no-store");
     const cr = upstream.headers.get("content-range");
     if (cr) res.setHeader("Content-Range", cr);
     const cl = upstream.headers.get("content-length");
