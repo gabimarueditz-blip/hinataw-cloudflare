@@ -564,6 +564,23 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
       lastErr = e;
     }
   }
+  // The signed app API (Genga-World protocol) answers the same play question
+  // with files on the bcdn host, which serves this host's egress, while the h5
+  // player's h264 files sit on bcdnxw and are refused there (426/429 — Render
+  // included). It also covers limited/VIP episodes whose h5 answer carries no
+  // streams at all, which is what used to open the "Please log in before
+  // payment" modal. Started here so both lookups run in parallel.
+  const mobileSourcesPromise = Promise.race([
+    mobileStream({ subjectId: id, se: numSe, ep: numEp }),
+    new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error("mobile play timeout")), 25000);
+      t.unref?.();
+    }),
+  ]).catch((e) => {
+    lastErr = lastErr || e;
+    return [];
+  });
+
   let sources = data
     ? (data.streams || [])
         .filter((s) => s && s.url)
@@ -577,33 +594,22 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
         .sort((a, b) => b.resolution - a.resolution)
     : [];
 
-  // Limited/VIP episodes (and h5 play outages) answer with no streams — the
-  // web player would then open its "Please log in before payment" modal, which
-  // is exactly the error this fallback exists to remove. The signed mobile app
-  // API (Genga-World protocol) still hands back plain files for these: first
-  // via play-info, then via the same UGC download-list bypass the official app
-  // uses, so the player keeps a direct source and never needs the embed.
-  if (!sources.length) {
-    try {
-      const mob = await Promise.race([
-        mobileStream({ subjectId: id, se: numSe, ep: numEp }),
-        new Promise((_, reject) => {
-          const t = setTimeout(() => reject(new Error("mobile play timeout")), 25000);
-          t.unref?.();
-        }),
-      ]);
-      if (mob && mob.length) {
-        sources = mob.map((s) => ({
-          resolution: s.resolution || 0,
-          format: s.format || "MP4",
-          size: s.size || 0,
-          url: streamUrlFor(s.direct),
-          direct: s.direct,
-        }));
-      }
-    } catch (e) {
-      lastErr = lastErr || e;
-    }
+  // App files lead: they are the ones this host can actually relay. The h5
+  // list stays behind them as failover (and for titles the app API misses),
+  // which keeps the direct-first ordering the player already relies on.
+  const mobileSources = await mobileSourcesPromise;
+  if (mobileSources && mobileSources.length) {
+    const seen = new Set(sources.map((s) => s.direct));
+    const fromApp = mobileSources
+      .filter((s) => s && s.direct && !seen.has(s.direct))
+      .map((s) => ({
+        resolution: s.resolution || 0,
+        format: s.format || "MP4",
+        size: s.size || 0,
+        url: streamUrlFor(s.direct),
+        direct: s.direct,
+      }));
+    sources = [...fromApp, ...sources];
   }
 
   if (!data && !sources.length) {
@@ -627,14 +633,19 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
 // Only hosts we resolved ourselves are allowed (no open proxy).
 const ALLOWED_CDN_HOSTS = /(\.hakunaymatata\.com|\.aoneroom\.com|\.moviebox\.ph)$/i;
 
-// The video CDN filters on the client, not on our IP: it wants an app-style
-// User-Agent *and* the moviebox.ph Referer. A browser UA is answered 428 (the
-// paywall gate the web player trips), and either header on its own earns a 429
-// from nginx, while okhttp + Referer returns 206 video/mp4 with a valid
-// Content-Range. Verified from Render's own egress through /api/diag and
-// against both bcdn / bcdnxw hosts, so playback is relayed looking like the
-// mobile app. Extra profiles stay as failover in case one host tightens up.
+// The video CDN gates on the client, never on us: a browser UA is answered
+// 428/426 (the paywall the web player trips) on every host, so the relay has
+// to look like the mobile app. What each host then wants differs — bcdn serves
+// an app UA with no Referer and rejects a Referer, bcdnxw needs the site
+// Referer — so profiles are tried in order instead of guessing per host.
+// Verified from Render's own egress through /api/diag: okhttp gets 206
+// video/mp4 with a valid Content-Range on bcdn, okhttp+Referer on bcdnxw.
 const CDN_HEADER_PROFILES = [
+  // The bcdn host the app API hands back serves an app UA with no Referer and
+  // rejects a Referer outright (nginx 429).
+  { "User-Agent": "okhttp/4.12.0", Accept: "*/*" },
+  // bcdnxw (the h5 h264 host) is the other way round: it wants the site
+  // Referer, and only then answers a datacenter egress at all.
   {
     "User-Agent": "okhttp/4.12.0",
     Referer: `${SITE}/`,
@@ -642,7 +653,6 @@ const CDN_HEADER_PROFILES = [
     Accept: "*/*",
     "Accept-Language": "en-US,en;q=0.9",
   },
-  { "User-Agent": "okhttp/4.12.0", Accept: "*/*" },
   { "User-Agent": "node", Accept: "*/*" },
 ];
 const CDN_RETRY_STATUS = new Set([403, 426, 428, 429, 451]);
