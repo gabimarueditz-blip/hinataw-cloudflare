@@ -1856,10 +1856,13 @@ export async function handleAnimeApi(req, res) {
                 embedUrl: streamData.embedUrl || "",
               }));
               if (streamData.embedUrl) {
-                streams.unshift({
+                // The embed goes last: the MovieBox web player opens its
+                // "Please log in before payment" modal, so it may only appear
+                // as a failover after every direct file has failed.
+                streams.push({
                   url: "",
                   embedUrl: streamData.embedUrl,
-                  server: "Mirror (Stream)",
+                  server: "Mirror (Embed)",
                   type: "embed",
                 });
               }
@@ -1945,14 +1948,15 @@ export async function handleAnimeApi(req, res) {
             // own browser — still plays. Keep it as the final failover target
             // so playback survives wherever the relay hop is blocked.
             if (streamData.embedUrl) {
-              // The MovieBox player leads: it loads in the viewer's own
-              // browser, so it works even where the CDN rejects this
-              // server's egress for the MP4 relay. The MP4 mirrors follow.
-              streams.unshift({
+              // The embed is the final failover only: the MovieBox web player
+              // opens its "Please log in before payment" modal, so the direct
+              // MP4 mirrors must lead and the player page is kept for hosts
+              // whose egress the CDN rejects outright.
+              streams.push({
                 url: "",
                 embedUrl: streamData.embedUrl,
-                label: "MovieBox Player",
-                server: "MovieBox Player",
+                label: "MovieBox Player (Embed)",
+                server: "MovieBox Player (Embed)",
                 type: "embed",
               });
             }
@@ -2110,7 +2114,7 @@ export async function handleAnimeApi(req, res) {
     const queryKey = q.trim().toLowerCase().replace(/\s+/g, " ");
     let items = [];
     try {
-      items = await Promise.race([searchMoviebox(q), movieboxCap(3000, "search")]).catch(() => []);
+      items = await Promise.race([searchMoviebox(q), movieboxCap(6000, "search")]).catch(() => []);
     } catch {}
 
     if (!items || !items.length) {

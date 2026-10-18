@@ -29,6 +29,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { pipeWebStream, canStream } from "./stream-utils.js";
+import { mobileStream, mobileSearch } from "./moviebox-mobile.js";
 
 // The same wefeed BFF is served on two hosts. This site runs on Cloudflare
 // Workers, and h5-api.aoneroom.com rejects that egress (429/427) while
@@ -439,13 +440,30 @@ export async function fetchMovieboxList(tabId, page = 1, perPage = 24) {
 export async function searchMoviebox(query, page = 1) {
   const q = String(query || "").trim();
   if (!q) return [];
-  await ensureToken();
-  const data = await api("/subject/search", {
-    method: "POST",
-    payload: { keyword: q, page: Math.max(1, Number(page) || 1), perPage: 20 },
-  });
-  const inner = data?.data || {};
-  const raw = inner.items || inner.list || [];
+
+  // The signed mobile API leads: the h5 POST search is rejected outright on
+  // some egresses (Render answers 429 and POSTs have no reader path), while
+  // the mobile endpoint answers everywhere. The h5 search stays as the
+  // fallback when mobile is down.
+  let raw = [];
+  try {
+    raw = await mobileSearch(q, page);
+  } catch {
+    raw = [];
+  }
+  if (!raw.length) {
+    try {
+      await ensureToken();
+      const data = await api("/subject/search", {
+        method: "POST",
+        payload: { keyword: q, page: Math.max(1, Number(page) || 1), perPage: 20 },
+      });
+      const inner = data?.data || {};
+      raw = inner.items || inner.list || [];
+    } catch {
+      raw = [];
+    }
+  }
   return raw.map(normalizeItem).filter(Boolean);
 }
 
@@ -546,38 +564,61 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
       lastErr = e;
     }
   }
-  if (!data) {
-    throw new Error(`moviebox play -> ${lastStatus || (lastErr && lastErr.message) || "unreachable"}`);
+  let sources = data
+    ? (data.streams || [])
+        .filter((s) => s && s.url)
+        .map((s) => ({
+          resolution: Number(s.resolutions) || 0,
+          format: String(s.format || "MP4"),
+          size: s.size || 0,
+          url: streamUrlFor(s.url),
+          direct: s.url,
+        }))
+        .sort((a, b) => b.resolution - a.resolution)
+    : [];
+
+  // Limited/VIP episodes (and h5 play outages) answer with no streams — the
+  // web player would then open its "Please log in before payment" modal, which
+  // is exactly the error this fallback exists to remove. The signed mobile app
+  // API (Genga-World protocol) still hands back plain files for these: first
+  // via play-info, then via the same UGC download-list bypass the official app
+  // uses, so the player keeps a direct source and never needs the embed.
+  if (!sources.length) {
+    try {
+      const mob = await Promise.race([
+        mobileStream({ subjectId: id, se: numSe, ep: numEp }),
+        new Promise((_, reject) => {
+          const t = setTimeout(() => reject(new Error("mobile play timeout")), 25000);
+          t.unref?.();
+        }),
+      ]);
+      if (mob && mob.length) {
+        sources = mob.map((s) => ({
+          resolution: s.resolution || 0,
+          format: s.format || "MP4",
+          size: s.size || 0,
+          url: streamUrlFor(s.direct),
+          direct: s.direct,
+        }));
+      }
+    } catch (e) {
+      lastErr = lastErr || e;
+    }
   }
 
-  const sources = (data.streams || [])
-    .filter((s) => s && s.url)
-    .map((s) => ({
-      resolution: Number(s.resolutions) || 0,
-      format: String(s.format || "MP4"),
-      size: s.size || 0,
-      url: streamUrlFor(s.url),
-      direct: s.url,
-    }))
-    .sort((a, b) => b.resolution - a.resolution);
-  // Fallback to embedUrl if no direct MP4 sources are present
-  if (!sources.length && embedUrl) {
-    sources.push({
-      resolution: 0,
-      format: "EMBED",
-      size: 0,
-      url: embedUrl,
-      direct: embedUrl,
-    });
+  if (!data && !sources.length) {
+    throw new Error(`moviebox play -> ${lastStatus || (lastErr && lastErr.message) || "unreachable"}`);
   }
 
   const embedUrl = `${domains[0] || PLAYER_DEFAULT}/spa/videoPlayPage/movies/${path}?id=${id}&type=/movie/detail&detailSe=${numSe}&detailEp=${numEp}&lang=en`;
 
   return {
-    hasResource: Boolean(data.hasResource),
-    limited: Boolean(data.limited),
-    freeEpisodes: data.freeNum,
+    hasResource: Boolean(data?.hasResource) || Boolean(sources.length),
+    limited: Boolean(data?.limited),
+    freeEpisodes: data?.freeNum,
     sources,
+    // The embed stays in the response as a *last-resort* failover only — the
+    // frontend must never auto-select it while a direct source exists.
     embedUrl,
   };
 }

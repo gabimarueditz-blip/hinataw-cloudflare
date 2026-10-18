@@ -8778,26 +8778,25 @@ let heroSwapTimer = null;
         }
         const mbSources = (data.sources || []).filter(s => s && s.url);
         currentStreams = [];
-        // The MovieBox player leads: it runs in the viewer's own browser, so
-        // it plays on every host — including ones whose server egress the
-        // MovieBox CDN rejects for the byte relay. Direct MP4s stay behind
-        // it as same-origin mirrors for hosts where the relay works.
-        if (data.embedUrl) {
-          currentStreams.push({
-            server: 'MovieBox Player',
-            embedUrl: data.embedUrl,
-            type: 'embed',
-            resolution: 1080,
-          });
-        }
+        // Direct files lead: they play in the ad-free native player. The
+        // MovieBox web player is pushed last as a failover only — it opens a
+        // "Please log in before payment" modal, so it must never autoplay.
         for (const s of mbSources) {
+          const isHls = String(s.format || '').toUpperCase() === 'HLS';
           currentStreams.push({
-            server: `${s.resolution}p MP4`,
+            server: `${s.resolution ? s.resolution + 'p · ' : ''}${isHls ? 'HLS' : 'MP4'}`,
             url: s.url,
             direct: s.direct,
-            embedUrl: data.embedUrl || '',
-            type: 'mp4',
+            type: isHls ? 'hls' : 'mp4',
             resolution: s.resolution,
+          });
+        }
+        if (data.embedUrl) {
+          currentStreams.push({
+            server: 'MovieBox Player (Embed)',
+            embedUrl: data.embedUrl,
+            type: 'embed',
+            resolution: 0,
           });
         }
         if (!currentStreams.length) {
@@ -9476,9 +9475,14 @@ let heroSwapTimer = null;
         }
 
         const toStreamEntry = (s, hidden) => {
-          const isEmbed = Boolean(s.embedUrl) || s.type === 'embed' || String(s.url || s.stream || '').includes('/embed') || String(s.url || s.stream || '').includes('/e/') || String(s.url || s.stream || '').includes('/spa/');
-          const embedUrl = s.embedUrl || (isEmbed ? (s.url || s.stream || '') : '');
-          const directUrl = isEmbed ? '' : (s.url || s.stream || '');
+          const rawUrl = String(s.url || s.stream || '');
+          // An entry is an embed only when it has no direct file: a direct
+          // mirror may also carry embedUrl for failover, and treating it as
+        // an embed would auto-play the gated MovieBox player (login modal).
+          const looksEmbed = s.type === 'embed' || rawUrl.includes('/embed') || rawUrl.includes('/e/') || rawUrl.includes('/spa/');
+          const isEmbed = looksEmbed || (!rawUrl && Boolean(s.embedUrl));
+          const directUrl = isEmbed ? '' : rawUrl;
+          const embedUrl = isEmbed ? (s.embedUrl || rawUrl) : '';
           return {
             server: s.label || s.server || (s.quality ? `${s.quality}` : (isEmbed ? 'Stream Player' : 'Auto')),
             url: directUrl,
@@ -9494,7 +9498,10 @@ let heroSwapTimer = null;
         ];
         updateServerDropdown(currentStreams);
         if (currentStreams.length) {
-          playStream(currentStreams[0]);
+          // Lead with a direct file when one exists: embed players (whose
+          // MovieBox copy shows a login/payment modal) only play as failover.
+          const autoIdx = currentStreams.findIndex(s => s && s.url);
+          playStream(currentStreams[autoIdx >= 0 ? autoIdx : 0]);
         } else {
           showToastNotification('No playable link found.');
         }
@@ -10805,9 +10812,9 @@ let hindiAnimeCarouselStarted = false;
       const code = document.getElementById('playerW2GCode').textContent;
       const url = `${window.location.origin}/#w2g-${code}`;
       navigator.clipboard.writeText(url).then(() => {
-        showToast('Watch2Gether room link copied to clipboard!');
+        showToastNotification('Watch2Gether room link copied to clipboard!');
       }).catch(() => {
-        showToast(`Room code: ${code}`);
+        showToastNotification(`Room code: ${code}`);
       });
     }
 
@@ -10875,7 +10882,7 @@ let hindiAnimeCarouselStarted = false;
 
     // Random Anime Launcher
     async function playRandomAnime() {
-      showToast('🎲 Shuffling anime universe...');
+      showToastNotification('🎲 Shuffling anime universe...');
       try {
         const res = await fetch('/api/anime/random');
         const json = await res.json();
@@ -11647,7 +11654,7 @@ let hindiAnimeCarouselStarted = false;
       if (currentStreams && currentStreams.length > 0 && currentStreamIndex + 1 < currentStreams.length) {
         currentStreamIndex++;
         const nextStream = currentStreams[currentStreamIndex];
-        showToast(`Switching to backup mirror (${currentStreamIndex + 1})...`);
+        showToastNotification(`Switching to backup mirror (${currentStreamIndex + 1})...`);
         // A backup that starts playing becomes visible, so the dropdown always
         // names what is actually on screen.
         if (nextStream.hidden) {
