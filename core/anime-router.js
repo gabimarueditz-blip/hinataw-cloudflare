@@ -1311,6 +1311,9 @@ export async function handleAnimeApi(req, res) {
           }
         ];
 
+    // ~450 KB of catalog rows that only change on the 6h sync: let the browser
+    // reuse this briefly so a revisit is instant instead of re-downloading it.
+    res.setHeader("Cache-Control", "public, max-age=60, stale-while-revalidate=600");
     res.statusCode = 200;
     return res.end(JSON.stringify({
       success: true,

@@ -367,11 +367,18 @@ export async function fetchMovieboxHome() {
     ...pick("Hollywood"),
   ];
   if (!moviePool.length) moviePool.push(...allItems.filter((i) => i.type === "movie" && !i.short));
-  let trending = pick("🔥Trending Now");
+  let trending = pick("🔥Trending Now", "Trending Now");
   if (!trending.length && ops.length) {
     trending = (ops[0].subjects || []).map(normalizeItem).filter(Boolean);
   }
-  const animePool = pick("Top Anime");
+  if (!trending.length) trending = [...seriesPool, ...moviePool];
+  // "Top Anime" is gone from the renamed catalogue, and anime items are the
+  // only ones that may fill the Anime row: inheriting the series pool (the old
+  // fallback) is what put live-action shows such as Tulsa King under it.
+  const animePool = [
+    ...pick("Top Anime", "Anime", "Anime[English Dubbed]", "Anime English Dubbed"),
+    ...allItems.filter((i) => /anime|animation/i.test(String(i.genre || "")) && !i.short),
+  ];
 
   // De-dup by slug across pools.
   const dedupe = (list, cap) => {
@@ -404,7 +411,7 @@ export async function fetchMovieboxHome() {
     series: dedupe(seriesPool, 18),
     movies: dedupe(moviePool, 18),
     trending: dedupe(trending, 18),
-    anime: dedupe(animePool.length ? animePool : seriesPool, 18),
+    anime: dedupe(animePool, 18),
     // Raw curated sections (e.g. "Trending Now", "Cinema", "Bollywood",
     // "South Indian", "Hollywood", "Indian Drama", "Top Anime",
     // "Best Asian Series", "Western TV", "Free Now!", "Hot Short TV").
@@ -611,6 +618,7 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
       }));
     sources = [...fromApp, ...sources];
   }
+  sources.sort(playbackOrder);
 
   if (!data && !sources.length) {
     throw new Error(`moviebox play -> ${lastStatus || (lastErr && lastErr.message) || "unreachable"}`);
@@ -627,6 +635,33 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
     // frontend must never auto-select it while a direct source exists.
     embedUrl,
   };
+}
+
+// Which source the player should start on. Metadata sits at the head of these
+// MP4s, but a 1080p HEVC master still needs a multi-megabyte moov before it
+// renders, and on a small host that is the whole difference between "plays"
+// and "spinning loader". So: H.264 before HEVC (browsers advertise HEVC support
+// they often cannot decode), 480p before 720p before 360p before 1080p, and
+// anything above 720p demoted behind the mirrors that actually start.
+function playbackOrder(a, b) {
+  // bcdnxw is the h5 player's h264 host and refuses datacenter egress outright
+  // (426 from Render), while the app's bcdn links stream fine there. Reachable
+  // first, then HEVC last (a 1080p HEVC master needs a multi-megabyte moov
+  // before it renders), then the resolution closest to 480p so playback starts
+  // instead of buffering a 1080p file.
+  const GATED_HOST = /bcdnxw|bcdnxw2/i;
+  const hostOf = (s) => {
+    try { return new URL(String(s && s.direct ? s.direct : "")).hostname; } catch { return ""; }
+  };
+  const rank = (s) => {
+    const u = String(s && s.direct ? s.direct : "").toLowerCase();
+    const hevc = /h265|x265|hev1|hvc1/.test(u);
+    const res = Number(s && s.resolution) || 0;
+    return (GATED_HOST.test(hostOf(s)) ? 8 : 0) + (hevc ? 2 : 0) + (res > 720 ? 1 : 0);
+  };
+  const byRank = rank(a) - rank(b);
+  if (byRank) return byRank;
+  return Math.abs((Number(a.resolution) || 0) - 480) - Math.abs((Number(b.resolution) || 0) - 480);
 }
 
 // Relay a CDN range request through this same-origin proxy.

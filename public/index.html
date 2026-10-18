@@ -5754,6 +5754,16 @@
     <!-- SEARCH RESULTS GRID -->
     <section id="searchResultsSection" style="display: none;">
       <div class="anime-grid" id="searchGrid"></div>
+      <!-- MovieBox + Hindi hits: their own grids so the card shapes and click
+           routing stay right (these open by slug, not by HiAnime id). -->
+      <div id="searchMovieboxBlock" style="display: none; margin-top: 26px;">
+        <h3 class="hianime-heading" id="searchMovieboxHeading">MovieBox</h3>
+        <div class="anime-grid" id="searchMovieboxGrid"></div>
+      </div>
+      <div id="searchHindiBlock" style="display: none; margin-top: 26px;">
+        <h3 class="hianime-heading" id="searchHindiHeading">Hindi catalogue</h3>
+        <div class="anime-grid" id="searchHindiGrid"></div>
+      </div>
     </section>
 
     <!-- ANIME EXPLORER SECTION -->
@@ -8389,11 +8399,22 @@ let heroSwapTimer = null;
     // blindly taking operatingList order, which showed "Hot Short TV" under the
     // "Trending Now" heading). Unmatched slots fall back to the next unused
     // section, then to the bucketed feed.
+    // A row may only claim a section that actually holds its kind of content.
+    // The old code fell back to "the next unused section", so a renamed upstream
+    // catalogue ("Top Anime" is now "Anime[English Dubbed]") put live-action
+    // series under the Anime heading. Each shell now states what it accepts.
+    const mostlyIn = (items, test) => {
+      const list = Array.isArray(items) ? items : [];
+      if (!list.length) return false;
+      return list.filter(test).length * 2 >= list.length;
+    };
+    const looksAnime = (it) => /anime|animation/i.test(String(it.genre || '')) || /anime/i.test(String(it.title || ''));
+    const looksMovie = (it) => String(it.type || '').toLowerCase() === 'movie';
     const MB_SHELLS = [
-      { cat: 'mb-trending', fallback: 'Trending Now', prefer: ['Trending Now', 'Free Now!'] },
-      { cat: 'mb-anime',    fallback: 'Top Anime',    prefer: ['Top Anime'] },
-      { cat: 'mb-series',   fallback: 'TV Series',    prefer: ['Best Asian Series', 'Western TV', 'Indian Drama', 'Hot Short TV'] },
-      { cat: 'mb-movies',   fallback: 'Movies',       prefer: ['Cinema', 'Hollywood', 'Bollywood', 'South Indian'] },
+      { cat: 'mb-trending', fallback: 'Trending Now', prefer: ['Trending Now', 'Free Now!', 'Popular Series'], accept: () => true },
+      { cat: 'mb-anime',    fallback: 'Top Anime',    prefer: ['Top Anime', 'Anime', 'Anime English Dubbed'], accept: (s) => mostlyIn(s.items, looksAnime) },
+      { cat: 'mb-series',   fallback: 'TV Series',    prefer: ['Best Asian Series', 'Western TV', 'Indian Drama', 'Popular Series'], accept: (s) => mostlyIn(s.items, (it) => !looksMovie(it) && !it.short) },
+      { cat: 'mb-movies',   fallback: 'Movies',       prefer: ['Cinema', 'Hollywood', 'Bollywood', 'South Indian', 'Popular Movie'], accept: (s) => mostlyIn(s.items, looksMovie) },
     ];
 
     // Drop any previously appended extra rows (and their autoplay timers) so a
@@ -8490,10 +8511,27 @@ let heroSwapTimer = null;
         return sections[i];
       };
 
+      const claimAccepting = (accept) => {
+        if (!accept) return null;
+        const i = sections.findIndex((s, idx) => !used.has(idx) && s.items && s.items.length && accept(s));
+        if (i < 0) return null;
+        used.add(i);
+        return sections[i];
+      };
+
       MB_SHELLS.forEach(shell => {
-        const sec = claim(shell.prefer) || claimNext();
-        const items = (sec && sec.items && sec.items.length) ? sec.items : (buckets[shell.cat] || []);
-        if (!items.length) return;
+        const sec = claim(shell.prefer) || claimAccepting(shell.accept);
+        let items = (sec && sec.items && sec.items.length) ? sec.items : (buckets[shell.cat] || []);
+        // A bucket that does not fit the row's own rule is worse than an empty
+        // row: the API's "anime" pool used to be filled with live-action series.
+        if (shell.cat === 'mb-anime' && items.length && !mostlyIn(items, looksAnime)) {
+          items = items.filter(looksAnime);
+        }
+        if (!items.length) {
+          const track = document.getElementById(getCategoryCarousel(shell.cat).trackId);
+          if (track) track.innerHTML = '';
+          return;
+        }
         initCategoryCarousel(shell.cat, items);
         updateCarouselHeading(shell.cat, (sec && sec.title) || shell.fallback);
       });
@@ -8626,7 +8664,7 @@ let heroSwapTimer = null;
         const slugAttr = String(a.slug || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         const typeAttr = a.type === 'movie' ? 'movie' : 'series';
 
-        return `                <div class="hianime-card" onclick="openPlayerById('${idAttr}')" data-title="${escapeHtml(title)}">
+        return `                <div class="hianime-card" onclick="openMovieboxDetail('${slugAttr}', '${typeAttr}', this.getAttribute('data-title'))" data-title="${escapeHtml(title)}">
             <div class="hianime-poster-wrap">
               <img src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
               <div class="hianime-badges-over">
@@ -10069,11 +10107,8 @@ let hindiAnimeCarouselStarted = false;
         }
 
         renderGrid('searchGrid', hiResults);
-        const finalSearchGridEl = document.getElementById('searchGrid');
-        if (finalSearchGridEl) {
-          finalSearchGridEl.insertAdjacentHTML('beforeend', renderMovieboxResultsGrid(mbResults, 'More results'));
-          finalSearchGridEl.insertAdjacentHTML('beforeend', renderIndiaResultsGrid(indiaResults));
-        }
+        renderMovieboxResultsGrid(mbResults, 'MovieBox');
+        renderIndiaResultsGrid(indiaResults, 'Hindi catalogue');
         window.scrollTo({ top: 0, behavior: 'smooth' });
       } catch (err) {
         console.error('Search request error:', err);
@@ -10087,9 +10122,20 @@ let hindiAnimeCarouselStarted = false;
 
     // Hindi (animahd) search hits, rendered with the India card shape so each
     // result opens the Hindi player rather than the HiAnime or MovieBox one.
-    function renderIndiaResultsGrid(list) {
-      if (!list || !list.length) return '';
-      const cards = list.map((item) => {
+    // Hindi hits render in their own grid and open the India player, which
+    // resolves seasons/episodes/stream itself (ids are `moviebox:` / `goku:`).
+    function renderIndiaResultsGrid(list, label) {
+      const block = document.getElementById('searchHindiBlock');
+      const grid = document.getElementById('searchHindiGrid');
+      const heading = document.getElementById('searchHindiHeading');
+      if (!block || !grid) return;
+      if (!list || !list.length) {
+        block.style.display = 'none';
+        grid.innerHTML = '';
+        return;
+      }
+      if (heading) heading.textContent = `${label || 'Hindi catalogue'} (${list.length})`;
+      grid.innerHTML = list.map((item) => {
         const title = item.title || 'Hindi title';
         const cover = item.image || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
         const kind = item.type === 'movie' ? 'movie' : 'series';
@@ -10108,28 +10154,41 @@ let hindiAnimeCarouselStarted = false;
               <div class="hianime-card-sub">
                 <span>${kind === 'movie' ? 'Movie' : 'Series'}</span>
                 <span class="hianime-dot">•</span><span>Hindi</span>
-                ${item.year ? `<span class="hianime-dot">•</span><span>${escapeHtml(String(item.year))}</span>` : ''}
               </div>
             </div>
           </div>
         `;
       }).join('');
-      return `<h3 class="hianime-heading" style="margin:26px 0 10px;">Hindi catalogue</h3>${cards}`;
+      block.style.display = 'block';
     }
 
-    // Returns MovieBox card HTML (section header + cards) for insertion after a
-    // search grid render. Uses the same card shape as renderGrid() but with its
-    // own vendor label.
+    // MovieBox hits get their own grid. These cards must open the MovieBox
+    // detail/player by slug: rendering them through openPlayerById() resolved a
+    // HiAnime title that happened to share the numeric id, so clicking a
+    // MovieBox search result could play a completely different show.
     function renderMovieboxResultsGrid(list, label) {
-      if (!list || !list.length) return '';
-      const cards = list.map(item => {
+      const block = document.getElementById('searchMovieboxBlock');
+      const grid = document.getElementById('searchMovieboxGrid');
+      const heading = document.getElementById('searchMovieboxHeading');
+      if (!block || !grid) return;
+      if (!list || !list.length) {
+        block.style.display = 'none';
+        grid.innerHTML = '';
+        return;
+      }
+      if (heading) heading.textContent = `${label || 'MovieBox'} (${list.length})`;
+      grid.innerHTML = list.map((item) => {
         const title = item.title || 'Untitled';
         const cover = item.image || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
         const slug = String(item.slug || '').replace(/[^a-zA-Z0-9\-_/:.]/g, '');
         const kind = item.type === 'movie' ? 'movie' : 'series';
         const rating = item.rating ? String(item.rating) : '';
+        const year = item.year ? String(item.year) : '';
+        const click = slug
+          ? `onclick="openMovieboxDetail('${slug}', '${kind}', this.getAttribute('data-title'))"`
+          : '';
         return `
-          <div class="hianime-card" onclick="openPlayerById(${JSON.stringify(item.id)})" data-title="${escapeHtml(title)}">
+          <div class="hianime-card" ${click} data-title="${escapeHtml(title)}">
             <div class="hianime-poster-wrap">
               <img src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
               <div class="hianime-badges-over">
@@ -10140,13 +10199,13 @@ let hindiAnimeCarouselStarted = false;
               <h3 class="hianime-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
               <div class="hianime-card-sub">
                 <span>${kind === 'movie' ? 'Movie' : 'Series'}</span>
-                ${item.year ? `<span class="hianime-dot">•</span><span>${escapeHtml(String(item.year))}</span>` : ''}
+                ${year ? `<span class="hianime-dot">•</span><span>${escapeHtml(year)}</span>` : ''}
               </div>
             </div>
           </div>
         `;
       }).join('');
-      return renderMovieboxResultsSectionHeader(label) + `${cards}`;
+      block.style.display = 'block';
     }
 
     function handleSearchSubmit(query) {
