@@ -6,6 +6,7 @@ import { FEATURED_ANIME, searchAnime, getAnimeById } from "./anime-service.js";
 import { searchHiAnime, browseHiAnime, getHiAnimeEpisodes, getAnimeWithEpisodes, getHiAnimeEpisodeStream } from "./hianime-service.js";
 import { getSyncedHiAnimeData, loadHiAnimeCacheFromDisk, runHiAnimeSync, searchSyncedAnime, getSyncedAnimeByLetter } from "./hianime-sync.js";
 import { getTrendingOngoing } from "./anilist.js";
+// Second Hindi catalogue (AnimeSalt / WatchAnimeWorld) behind one JSON shape.
 import {
   fetchMovieboxHome,
   fetchMovieboxList,
@@ -1541,6 +1542,9 @@ export async function handleAnimeApi(req, res) {
       return res.end(JSON.stringify({ success: false, error: "Movies library unavailable" }));
     }
   }
+
+  // Renime (AnimeSalt / WatchAnimeWorld): the other Hindi catalogue the owner
+  // supplied. One JSON shape for search, title info with its episode list, and
 
   if (pathname === "/api/india/search") {
     const q = url.searchParams.get("q") || "";

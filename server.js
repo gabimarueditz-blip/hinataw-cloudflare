@@ -32,7 +32,6 @@ const STATIC = {
   "/index.html":     { inline: true },
   "/app":            { inline: true },
   // The manga portal is its own document, opened in a new tab.
-  "/manga":          { inlineManga: true },
   "/manga.html":     { inlineManga: true },
   "/docs":           { file: "docs/index.html",   mime: "text/html" },
   "/docs/":          { file: "docs/index.html",   mime: "text/html" },

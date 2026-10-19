@@ -1,0 +1,23 @@
+service:
+  name: hinataw-exe
+  type: web
+  env: node
+  plan: free
+  runtime: nodejs20.linux
+  buildCommand: npm install
+  startCommand: node server.js
+  envVars:
+    - key: RENDER_API_KEY
+      fromSecret: render_api_key
+    - key: PORT
+      value: 3000
+    - key: BASE_PATH
+      value: ""
+    - key: NODE_ENV
+      value: production
+    - key: CACHE_ENABLED
+      value: "true"
+    - key: GW_API_BASE_URL
+      value: "https://api.gengaworld.example.com"
+  healthCheckPath: /api/home
+  autoDeploy: true

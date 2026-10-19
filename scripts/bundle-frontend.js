@@ -36,8 +36,15 @@ try {
   // into the page body. On a plain-HTML site there is no client router/hydration,
   // so the component is prerendered at build time instead of mounted in a layout.
   const analyticsMarkup = renderToStaticMarkup(createElement(Analytics));
-  const htmlWithAnalytics = html.includes("</body>")
-    ? html.replace("</body>", `${analyticsMarkup}\n</body>`)
+  // Inject at the LAST </body>, never the first: the page's inline scripts
+  // contain literal `</body>` sequences inside JS strings (the owner-ad tab
+  // document), and String.replace() hits the first one — which spliced the
+  // analytics newline into the middle of that single-quoted string, made the
+  // whole ads script a SyntaxError, and with it every function defined there
+  // (fireOwnerAd, which openPlayer() calls — so no title could be opened).
+  const bodyCloseIdx = html.lastIndexOf("</body>");
+  const htmlWithAnalytics = bodyCloseIdx !== -1
+    ? `${html.slice(0, bodyCloseIdx)}${analyticsMarkup}\n</body>${html.slice(bodyCloseIdx + "</body>".length)}`
     : `${html}\n`;
   // Trim any trailing blank lines so the final byte sequence ends with
   // exactly one newline and the injected analytics markup sits on its own

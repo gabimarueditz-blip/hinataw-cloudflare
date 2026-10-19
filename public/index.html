@@ -10290,7 +10290,7 @@ let hindiAnimeCarouselStarted = false;
       try {
         // Both catalogs are searched: HiAnime results render with the legacy
         // cards, MovieBox results are appended (they open the MovieBox player).
-        const [hiRes, mbRes, indiaRes] = await Promise.all([
+        const [hiRes, mbRes, indiaRes, renimeRes] = await Promise.all([
           fetch(`/api/anime/search?q=${encodeURIComponent(query)}`).catch(() => null),
           fetch(`/api/moviebox/search?q=${encodeURIComponent(query)}`).catch(() => null),
           // The Hindi catalogue has its own search endpoint that the UI never
