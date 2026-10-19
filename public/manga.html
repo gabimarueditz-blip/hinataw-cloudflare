@@ -250,27 +250,52 @@
     // manga is actually opened or read (or a download affordance is clicked).
     // One-shot-per-session: the popunder may arm at most once per browser session
     // (reload-safe because the flag is in sessionStorage, cleared on tab close).
-    let __ownerAdArmed = false;
-    const OWNER_AD_SESSION_KEY = 'animeq_owner_ad_armed_v1';
-    function sessionHasArmed() {
-      try { return sessionStorage.getItem(OWNER_AD_SESSION_KEY) === '1'; } catch (e) { return false; }
-    }
-    function markSessionArmed() {
-      try { sessionStorage.setItem(OWNER_AD_SESSION_KEY, '1'); } catch (e) {}
-    }
-    function armOwnerAd() {
-      if (__ownerAdArmed) return;
-      if (sessionHasArmed()) return;
-      __ownerAdArmed = true;
-      markSessionArmed();
-      const parked = document.getElementById('ownerAdTag');
-      if (!parked) return;
+    // One popup per distinct viewer action: per title opened, per chapter read,
+    // per download clicked. Fired keys live in the tab session, so opening the
+    // same chapter again never fires a second popup.
+    // Same persistent key store as the anime app (localStorage, 30-day TTL,
+    // capped) so one chapter read is one popup even after the tab is closed,
+    // and the anime portal's episode keys are shared rather than duplicated.
+    const OWNER_AD_KEYS_STORE = 'hinataw_owner_ad_keys_v2';
+    const OWNER_AD_KEY_TTL = 30 * 24 * 60 * 60 * 1000;
+    function ownerAdKeys() {
       try {
-        const live = document.createElement('script');
-        live.textContent = parked.textContent || '';
-        document.body.appendChild(live);
-      } catch (e) {}
+        const now = Date.now();
+        const rows = JSON.parse(localStorage.getItem(OWNER_AD_KEYS_STORE) || '[]');
+        return new Map((Array.isArray(rows) ? rows : []).filter(
+          (r) => Array.isArray(r) && r[0] && now - (Number(r[1]) || 0) < OWNER_AD_KEY_TTL
+        ));
+      } catch (e) { return new Map(); }
     }
+    let __ownerAdArmed = ownerAdKeys().size > 0;
+    function armOwnerAd(key) {
+      try {
+        if (!key) return false;
+        const fired = ownerAdKeys();
+        if (fired.has(key)) return false;
+        fired.set(key, Date.now());
+        try {
+          localStorage.setItem(OWNER_AD_KEYS_STORE, JSON.stringify([...fired].slice(-300)));
+        } catch (e) {}
+        __ownerAdArmed = true;
+        const parked = document.getElementById('ownerAdTag');
+        if (!parked) return true;
+        try {
+          const live = document.createElement('script');
+          live.textContent = parked.textContent || '';
+          document.body.appendChild(live);
+        } catch (e) {}
+        return true;
+      } catch (e) { return false; }
+    }
+    // Switching back to the anime portal is its own viewer action: the first
+    // switch arms the tag, and switching back and forth never fires again.
+    document.addEventListener('click', function (ev) {
+      const el = ev.target && ev.target.closest
+        ? ev.target.closest('a[href="/"], a[href="index.html"], [data-portal="anime"]')
+        : null;
+      if (el) armOwnerAd('portal:manga-to-anime');
+    }, true);
 
     // Owner's zone-12024830 popunder is the ONLY ad on the site. Until a gated
     // action arms it (open manga / read chapter / download), every popup window
@@ -294,7 +319,7 @@
       const el = ev.target && ev.target.closest
         ? ev.target.closest('a[download], [data-ad-trigger="download"], [onclick*="download" i], button[title*="download" i]')
         : null;
-      if (el) armOwnerAd();
+      if (el) armOwnerAd('manga-download:' + location.hash + ':' + Date.now());
     }, true);
 
     function adBlockerDetected() {
@@ -557,7 +582,7 @@
     function openDetail(slugInput) {
       const slug = cleanSlug(slugInput);
       if (!slug) return;
-      armOwnerAd();
+      armOwnerAd('manga-detail:' + slug);
       const browse = document.getElementById('mBrowseView');
       const detail = document.getElementById('mDetailView');
       const body = document.getElementById('mDetailBody');
@@ -651,7 +676,7 @@
       const slug = cleanSlug(slugInput);
       const chapter = cleanSlug(chapterInput);
       if (!slug || !chapter) return;
-      armOwnerAd();
+      armOwnerAd('manga-chapter:' + slug + ':' + chapter);
       const overlay = document.getElementById('mangaReaderOverlay');
       const pages = document.getElementById('readerPages');
       if (!overlay || !pages) return;

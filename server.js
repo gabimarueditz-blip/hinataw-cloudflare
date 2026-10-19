@@ -42,6 +42,8 @@ const STATIC = {
   "/logo.svg":       { file: "docs/logo.svg",     mime: "image/svg+xml" },
   "/docs/logo.svg":  { file: "docs/logo.svg",     mime: "image/svg+xml" },
   "/sw.js":          { file: "public/sw.js",     mime: "application/javascript" },
+  // Buffer loader art (transparent GIF) served from disk like sw.js.
+  "/pikachu-buffer.gif": { file: "public/pikachu-buffer.gif", mime: "image/gif" },
 };
 
 function serveStatic(req, res, entry) {

@@ -2,6 +2,67 @@
 <html lang="en">
 <head>
   <!--
+    Owner ad tag (zone 12065764), parked inert exactly as supplied. It is
+    never live on page load: a viewer action arms it, one popup per thing —
+    one episode clicked, one chapter read. Re-clicking the same episode or
+    chapter never fires again.
+  -->
+  <script id="ownerAdTag" type="text/plain">(function(s){s.dataset.zone='12065764',s.src='https://al5sm.com/tag.min.js'})([document.documentElement, document.body].filter(Boolean).pop().appendChild(document.createElement('script')))</script>
+  <script>
+    // ===================== OWNER AD ARM =====================
+    // One popup per distinct viewer action, and never twice for the same one:
+    // the key is the episode/chapter being opened.
+    // Keys are kept in localStorage, not sessionStorage: the manga portal is a
+    // different tab with its own session, so a chapter read there and an
+    // episode opened here would otherwise both fire again after a tab close.
+    // They expire after 30 days and the list is capped.
+    const OWNER_AD_KEYS_STORE = 'hinataw_owner_ad_keys_v2';
+    const OWNER_AD_KEY_TTL = 30 * 24 * 60 * 60 * 1000;
+    function ownerAdKeys() {
+      try {
+        const now = Date.now();
+        const rows = JSON.parse(localStorage.getItem(OWNER_AD_KEYS_STORE) || '[]');
+        return new Map((Array.isArray(rows) ? rows : []).filter(
+          (r) => Array.isArray(r) && r[0] && now - (Number(r[1]) || 0) < OWNER_AD_KEY_TTL
+        ));
+      } catch (e) { return new Map(); }
+    }
+    function fireOwnerAd(key) {
+      try {
+        if (!key) return false;
+        const fired = ownerAdKeys();
+        if (fired.has(key)) return false;
+        fired.set(key, Date.now());
+        try {
+          localStorage.setItem(OWNER_AD_KEYS_STORE, JSON.stringify([...fired].slice(-300)));
+        } catch (e) {}
+        const parked = document.getElementById('ownerAdTag');
+        if (!parked) return false;
+        const live = document.createElement('script');
+        live.textContent = parked.textContent || '';
+        document.body.appendChild(live);
+        return true;
+      } catch (e) { return false; }
+    }
+    window.fireOwnerAd = fireOwnerAd;
+    // Switching portal is a viewer action of its own: the first switch arms
+    // the tag, and switching back and forth never fires it again.
+    document.addEventListener('click', function (ev) {
+      const el = ev.target && ev.target.closest
+        ? ev.target.closest('a[href*="manga"], [data-portal="manga"]')
+        : null;
+      if (el) fireOwnerAd('portal:anime-to-manga');
+    }, true);
+  </script>
+  <style>
+    /* Buffering: the owner's running-Pikachu GIF (transparent) is the buffer
+       loader, in both the resolver and the player itself. */
+    .buffer-pikachu { width: 96px; height: auto; image-rendering: pixelated; margin-bottom: 10px; }
+    #bufferOverlay { position: absolute; inset: 0; z-index: 5; display: none; align-items: center; justify-content: center; pointer-events: none; }
+    #bufferOverlay img { width: 104px; height: auto; image-rendering: pixelated; opacity: 0.95; filter: drop-shadow(0 4px 14px rgba(0, 0, 0, 0.55)); }
+    /* The owner asked for no item counts on the home carousels. */
+    .carousel-section-counter, .see-all-count { display: none !important; }
+  </style>  <!--
     Every third-party ad network was removed from this file. The live front end
     is built from public/index.html (see scripts/bundle-frontend.js); this copy
     is kept only for reference and carries no ad code.
@@ -6184,7 +6245,7 @@
 
       <section class="trending-carousel-section" id="hindiMovieListSection">
         <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="hindiMovieListCarouselHeading">Hindi Movies</h2>
+          <h2 class="hianime-heading" id="hindiMovieListCarouselHeading">All Hindi Movies</h2>
         </div>
         <div class="hianime-trending-wrap">
           <div class="trending-carousel-viewport" id="hindiMovieListCarouselViewport">
@@ -6270,28 +6331,7 @@
       </section>
 
       <!-- SECTION: TOP ANIME -->
-      <section class="trending-carousel-section" id="mbAnimeCarouselSection">
-        <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="mbAnimeCarouselHeading">Top Anime</h2>
-        </div>
-        <div class="hianime-trending-wrap">
-          <div class="trending-carousel-viewport" id="mbAnimeCarouselViewport">
-            <div class="trending-carousel-track" id="mbAnimeCarouselTrack"></div>
-          </div>
-          <div class="hianime-carousel-arrows">
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mb-anime', 'prev')" aria-label="Previous slide" title="Previous slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div class="carousel-dots-wrap" id="mbAnimeCarouselDotsWrap"></div>
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mb-anime', 'next')" aria-label="Next slide" title="Next slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-            <span class="carousel-section-counter" id="mbAnimeCarouselCounter"></span>
-          </div>
-        </div>
-      </section>
-
-      <!-- SECTION: TV SERIES -->
+            <!-- SECTION: TV SERIES -->
       <section class="trending-carousel-section" id="mbSeriesCarouselSection">
         <div class="hianime-trending-header">
           <h2 class="hianime-heading" id="mbSeriesCarouselHeading">TV Series</h2>
@@ -6314,28 +6354,7 @@
       </section>
 
       <!-- SECTION: MOVIES -->
-      <section class="trending-carousel-section" id="mbMoviesCarouselSection">
-        <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="mbMoviesCarouselHeading">Movies</h2>
-        </div>
-        <div class="hianime-trending-wrap">
-          <div class="trending-carousel-viewport" id="mbMoviesCarouselViewport">
-            <div class="trending-carousel-track" id="mbMoviesCarouselTrack"></div>
-          </div>
-          <div class="hianime-carousel-arrows">
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mb-movies', 'prev')" aria-label="Previous slide" title="Previous slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div class="carousel-dots-wrap" id="mbMoviesCarouselDotsWrap"></div>
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mb-movies', 'next')" aria-label="Next slide" title="Next slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-            <span class="carousel-section-counter" id="mbMoviesCarouselCounter"></span>
-          </div>
-        </div>
-      </section>
-
-      <!-- MOVIEBOX: every remaining curated section is rendered here as its own
+            <!-- MOVIEBOX: every remaining curated section is rendered here as its own
            stacked carousel, so nothing from the catalog is hidden. -->
       <div id="mbExtraSections"></div>
 
@@ -6700,13 +6719,16 @@
       <!-- Cinema Video Player Viewport -->
       <div class="video-viewport" id="videoViewport">
         <div class="player-loader" id="playerLoader">
-          <div class="spinner"></div>
+          <img class="buffer-pikachu" src="/pikachu-buffer.gif" alt="Loading"/>
           <p id="playerLoaderText">Fetching anime stream servers...</p>
         </div>
         <!-- Iframe player (no sandbox: provider embeds refuse to run inside one) -->
         <iframe id="videoIframe" class="video-frame" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="no-referrer"></iframe>
         <!-- Native Video Element (for direct HLS streams) -->
         <video id="videoNative" class="video-element" controls playsinline preload="auto" style="display: none;"></video>
+        <!-- Buffering indicator: the same running Pikachu, shown only while the
+             player is fetching more of the file. -->
+        <div id="bufferOverlay" aria-hidden="true"><img src="/pikachu-buffer.gif" alt="Buffering"/></div>
         <!-- Click to Play Overlay (for autoplay policy) -->
         <div id="videoPlayOverlay" onclick="resumePlayback()" style="display: none; position: absolute; inset: 0; background: rgba(0,0,0,0.45); z-index: 4; align-items: center; justify-content: center; cursor: pointer;">
           <div style="background: var(--accent); color: #fff; width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 24px rgba(255,59,107,0.6); transition: transform 0.2s;">
@@ -8411,10 +8433,8 @@ let heroSwapTimer = null;
     const looksAnime = (it) => /anime|animation/i.test(String(it.genre || '')) || /anime/i.test(String(it.title || ''));
     const looksMovie = (it) => String(it.type || '').toLowerCase() === 'movie';
     const MB_SHELLS = [
-      { cat: 'mb-trending', fallback: 'Trending Now', prefer: ['Trending Now', 'Free Now!', 'Popular Series'], accept: () => true },
-      { cat: 'mb-anime',    fallback: 'Top Anime',    prefer: ['Top Anime', 'Anime', 'Anime English Dubbed'], accept: (s) => mostlyIn(s.items, looksAnime) },
+      { cat: 'mb-trending', fallback: 'Trending Now', prefer: ['Trending Now', 'Popular Series'], accept: () => true },
       { cat: 'mb-series',   fallback: 'TV Series',    prefer: ['Best Asian Series', 'Western TV', 'Indian Drama', 'Popular Series'], accept: (s) => mostlyIn(s.items, (it) => !looksMovie(it) && !it.short) },
-      { cat: 'mb-movies',   fallback: 'Movies',       prefer: ['Cinema', 'Hollywood', 'Bollywood', 'South Indian', 'Popular Movie'], accept: (s) => mostlyIn(s.items, looksMovie) },
     ];
 
     // Drop any previously appended extra rows (and their autoplay timers) so a
@@ -8490,6 +8510,13 @@ let heroSwapTimer = null;
       // scanning sections first made the low-priority fallbacks ("Hot Short TV")
       // win over the intended section just because they came first upstream.
       const normTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      // Rows deliberately hidden from the home page ("Free Now!", "Coming Soon",
+      // the Dussehra row, and the Top Anime / Cinema shells above). Matching on
+      // the normalised upstream title keeps them gone across catalogue refreshes.
+      const HIDDEN_MB_SECTIONS = new Set(['freenow', 'comingsoon', 'dussehraburaikatheend', 'topanime', 'cinema']);
+      for (let i = sections.length - 1; i >= 0; i--) {
+        if (HIDDEN_MB_SECTIONS.has(normTitle(sections[i].title))) sections.splice(i, 1);
+      }
       const used = new Set();
       const claim = (titles) => {
         for (const t of titles) {
@@ -8528,8 +8555,12 @@ let heroSwapTimer = null;
           items = items.filter(looksAnime);
         }
         if (!items.length) {
+          // Hide the whole row, not just its cards: an empty shell left a
+          // heading with nothing under it after the row was removed.
           const track = document.getElementById(getCategoryCarousel(shell.cat).trackId);
           if (track) track.innerHTML = '';
+          const shellEl = document.getElementById(categoryDomPrefix(shell.cat) + 'CarouselSection');
+          if (shellEl) shellEl.style.display = 'none';
           return;
         }
         initCategoryCarousel(shell.cat, items);
@@ -8611,7 +8642,9 @@ let heroSwapTimer = null;
       // stay for browse/watchlist views that target .hianime-latest-grid.
       renderHindiCards(seriesList, 'hindiSeriesGrid');
       renderHindiCards(moviesList, 'hindiMoviesGrid');
-      initCategoryCarousel('hindi-movies', moviesList);
+      // The India movie feed is Hindi by construction, but it is filtered
+      // anyway so a stray non-Hindi entry can never appear in this row.
+      initCategoryCarousel('hindi-movies', moviesList.filter(isHindiItem));
       updateCarouselHeading('hindi-movies', 'Hindi Movies');
     }
 
@@ -9133,6 +9166,42 @@ let heroSwapTimer = null;
     // every category also appears under Hindi Series or Hindi Movies (by type),
     // while keeping its own category row. Where both catalogs carry a title, the
     // MovieBox copy is the one that lands here.
+    // ---- category truth ------------------------------------------------
+    // A row titled "Hindi Movies" must hold Hindi releases and "Hindi Anime"
+    // must hold anime. The curated feeds mix languages, so the Hindi rows are
+    // filtered by what each item actually is instead of trusting the section
+    // it arrived in (that is how English MovieBox titles ended up there).
+    function catalogItemText(item) {
+      if (!item) return '';
+      const t = item.title;
+      const named = typeof t === 'string' ? t : (t && (t.english || t.romaji || t.userPreferred));
+      return [named, item.rawTitle, item.slug, item.badge, item.genre, item.source]
+        .filter(Boolean).join(' ').toLowerCase();
+    }
+    function isIndiaFeedItem(item) {
+      if (!item) return false;
+      const id = String(item.id || '');
+      const src = String(item.source || '').toLowerCase();
+      return /^(goku|gokuhd|animahd|india):/i.test(id) || src === 'gokuhd.com' || src === 'animahd';
+    }
+    // Every India-feed title is a Hindi release; MovieBox items only count when
+    // their own metadata (badge or title) says Hindi.
+    function isHindiItem(item) {
+      if (!item) return false;
+      const text = catalogItemText(item);
+      const hasHindi = /(^|[^a-z])hindi([^a-z]|$)/i.test(text);
+      // The India feed also carries the odd Punjabi/Tamil/Telugu release, and
+      // a title tagged only in another language is not a Hindi title.
+      const otherLangOnly = !hasHindi && /(^|[^a-z])(punjabi|tamil|telugu|malayalam|kannada|bengali|marathi|gujarati|bhojpuri|urdu|english)([^a-z]|$)/i.test(text);
+      if (otherLangOnly) return false;
+      if (isIndiaFeedItem(item) || /hindi/i.test(String(item.badge || ''))) return true;
+      return hasHindi;
+    }
+    function isAnimeItem(item) {
+      if (!item) return false;
+      if (isIndiaFeedItem(item)) return true;
+      return /anime|animation|donghua|cartoon/i.test(String(item.genre || ''));
+    }
     function buildHindiCategoryRows() {
       const keys = [...categoryItems.keys()];
       const isCurated = (k) => k.startsWith('mb-') || k.startsWith('mbx-');
@@ -9154,6 +9223,8 @@ let heroSwapTimer = null;
           // here as "Hindi Series" makes a genuine 90-second episode look like
           // a trailer. They keep their own dedicated row instead.
           if (item.short) continue;
+          // Only real Hindi releases belong in a Hindi row.
+          if (!isHindiItem(item)) continue;
           const dedupeKey = catalogBaseTitle(titleOf(item));
           if (!dedupeKey || seen.has(dedupeKey)) continue;
           seen.add(dedupeKey);
@@ -9333,6 +9404,11 @@ let heroSwapTimer = null;
         const tags = [];
         if (rating) tags.push({ label: String(rating), highlight: !!rating });
         if (type) tags.push({ label: type });
+        // Make the language explicit on Hindi titles whose card title does
+        // not already carry [Hindi] in it.
+        if (isHindiItem(anime) && !/(^|[^a-z])hindi([^a-z]|$)/i.test(String(title))) {
+          tags.push({ label: 'Hindi' });
+        }
         if (year) tags.push({ label: year });
 
         // The Hindi rows are fed by the India catalogue (gokuhd.com now, animahd
@@ -9458,6 +9534,8 @@ let heroSwapTimer = null;
     }
 
     async function openIndiaStream(ids, title, episodeOptions = null, activeIndex = 1, seasons = null, seasonNumber = null) {
+      // Owner ad: one popup per Hindi episode/movie opened.
+      fireOwnerAd('india:' + (ids.episodeId || ids.movieId || 'title'));
       showToastNotification('Resolving stream…');
       try {
         const params = new URLSearchParams();
@@ -9631,10 +9709,12 @@ let heroSwapTimer = null;
       try {
         const res = await fetch('/api/india/movies-library', { cache: 'no-store' });
         const data = await res.json();
-        const items = ((data && data.success && data.items) || []).filter((i) => i && i.title);
+        // The library is MovieBox's whole movie pool, so a Punjabi/Tamil release
+        // can sit in it; a Hindi row keeps only titles that really are Hindi.
+        const items = ((data && data.success && data.items) || []).filter((i) => i && i.title && isHindiItem(i));
         if (!items.length) throw new Error('empty library');
         initCategoryCarousel('hindi-movie-list', items);
-        updateCarouselHeading('hindi-movie-list', 'Hindi Movies');
+        updateCarouselHeading('hindi-movie-list', 'All Hindi Movies');
       } catch (e) {
         const track = document.getElementById('hindiMovieListCarouselTrack');
         if (track) {
@@ -9726,7 +9806,7 @@ let hindiAnimeCarouselStarted = false;
             ? fallbackList
             : (cachedHomeData && cachedHomeData.indiaSeriesAnimes) || [];
           const mbHindi = (Array.isArray(movieboxLibrary) ? movieboxLibrary : [])
-            .filter((i) => i && i.title && /\[?hindi\]?/i.test(i.title));
+            .filter((i) => i && isHindiItem(i) && isAnimeItem(i));
           const seen = new Set();
           const candidates = [...base, ...mbHindi].filter((i) => {
             const k = String(i.title).toLowerCase().trim();
@@ -10501,6 +10581,13 @@ let hindiAnimeCarouselStarted = false;
 
     function openPlayer(anime, ep = 1, hianimeEpId = null, resumeTimestamp = null, skipAutoStream = false) {
       stopHeroAutoplay();
+      // Owner ad: one popup per episode opened, never again for the same one.
+      // skipAutoStream marks an internal hand-off — the India player already
+      // fired its own key just before calling in here — so a single click can
+      // never fire twice.
+      if (!skipAutoStream) {
+        fireOwnerAd('ep:' + ((anime && (anime.id || anime.hianimeId || anime.malId)) || 'unknown') + ':' + ep);
+      }
       selectedAnime = anime;
       currentEpisode = ep;
       currentHianimeEpId = hianimeEpId;
@@ -12360,6 +12447,71 @@ let hindiAnimeCarouselStarted = false;
       }
     }
 
+    // ---- Account helpers -------------------------------------------------
+    // The site's API sleeps on a free host, and Firebase email/password is not
+    // enabled for this project, so login must never hang on either: every call
+    // is bounded, the server answer decides, and a device-local account record
+    // lets the owner back in when the server is unreachable or was reset.
+    const AUTH_TIMEOUT_MS = 15000;
+    const LOCAL_ACCOUNTS_KEY = 'animeq_local_accounts';
+    async function hashPassword(pw) {
+      try {
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('hinataw::' + pw));
+        return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+      } catch (e) {
+        return 'plain:' + pw;
+      }
+    }
+    function loadLocalAccounts() {
+      try { return JSON.parse(localStorage.getItem(LOCAL_ACCOUNTS_KEY) || '{}') || {}; } catch (e) { return {}; }
+    }
+    async function saveLocalAccount(email, password, uid) {
+      try {
+        const accounts = loadLocalAccounts();
+        accounts[String(email).toLowerCase()] = { uid: uid || '', hash: await hashPassword(password), at: Date.now() };
+        localStorage.setItem(LOCAL_ACCOUNTS_KEY, JSON.stringify(accounts));
+      } catch (e) {}
+    }
+    async function matchLocalAccount(email, password) {
+      const account = loadLocalAccounts()[String(email).toLowerCase()];
+      if (!account) return null;
+      return account.hash === (await hashPassword(password)) ? account : null;
+    }
+    async function serverAuth(email, password, isSignUp, progress, watchlist, attempt = 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), AUTH_TIMEOUT_MS);
+      try {
+        const res = await fetch('/api/user/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, isSignUp, progress, watchlist }),
+          signal: controller.signal,
+        });
+        const data = await res.json().catch(() => null);
+        if (data && data.success && data.user) return { user: data.user, error: null };
+        if (data && data.error) return { user: null, error: data.error };
+        return { user: null, error: 'The server could not complete the sign-in.' };
+      } catch (err) {
+        // One retry: a free host answers the second call while it is waking.
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 1500));
+          return serverAuth(email, password, isSignUp, progress, watchlist, attempt + 1);
+        }
+        return { user: null, error: 'The server is waking up or unreachable. Please try again in a few seconds.' };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    function registerAccountInBackground(email, password) {
+      // Best effort: puts the account back on the server after a reset/restart
+      // so the next device can sign in normally.
+      fetch('/api/user/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, isSignUp: true }),
+      }).catch(() => {});
+    }
+
     async function handleAuthSubmit() {
       const emailInput = document.getElementById('authEmail');
       const passInput = document.getElementById('authPassword');
@@ -12385,40 +12537,49 @@ let hindiAnimeCarouselStarted = false;
         let serverUser = null;
         let serverError = null;
 
-        // 1. Direct Server Account & Progress sync (Cross-device, cross-browser guarantee)
-        try {
-          const authRes = await fetch('/api/user/auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              email,
-              password,
-              isSignUp: currentAuthMode === 'signup',
-              progress: getStoredProgress(),
-              watchlist: getStoredWatchlist()
-            })
-          });
-          const authData = await authRes.json();
-          if (authData && authData.success && authData.user) {
-            serverUser = authData.user;
-          } else if (authData && authData.error) {
-            serverError = authData.error;
-          }
-        } catch (serverErr) {
-          console.warn("Server auth note:", serverErr.message);
-        }
+        // 1. Direct Server Account & Progress sync (Cross-device, cross-browser
+        //    guarantee). Bounded, retried once, never allowed to hang the button.
+        const authResult = await serverAuth(
+          email,
+          password,
+          currentAuthMode === 'signup',
+          getStoredProgress(),
+          getStoredWatchlist()
+        );
+        serverUser = authResult.user;
+        serverError = authResult.error;
+        if (serverUser) await saveLocalAccount(email, password, serverUser.uid);
 
-        // 2. Firebase Auth integration
+        // 2. Firebase Auth integration — optional, and never awaited for long:
+        //    email/password is disabled on this project, so a failure here must
+        //    not delay the server answer that decides the login.
         let fbSuccess = false;
         try {
-          if (currentAuthMode === 'signin') {
-            await firebase.auth().signInWithEmailAndPassword(email, password);
-          } else {
-            await firebase.auth().createUserWithEmailAndPassword(email, password);
+          if (typeof firebase !== 'undefined' && firebase.auth) {
+            const fbAttempt = currentAuthMode === 'signin'
+              ? firebase.auth().signInWithEmailAndPassword(email, password)
+              : firebase.auth().createUserWithEmailAndPassword(email, password);
+            await Promise.race([
+              fbAttempt,
+              new Promise((_, reject) => setTimeout(() => reject(new Error('firebase timeout')), 5000)),
+            ]);
+            fbSuccess = true;
           }
-          fbSuccess = true;
         } catch (fbErr) {
           console.warn("Firebase Auth note:", fbErr.message);
+        }
+
+        // 2b. Device-local account: the last way in when the server is asleep,
+        //     unreachable, or was reset by a deploy. Matching credentials still
+        //     log the owner in, and the account is pushed back to the server.
+        if (!serverUser && !fbSuccess) {
+          const local = await matchLocalAccount(email, password);
+          if (local) {
+            serverUser = { uid: local.uid || ('local_' + email.toLowerCase()), email, watchProgress: {}, watchlist: {} };
+            serverError = null;
+            registerAccountInBackground(email, password);
+            showAuthToast('Signed in from this device — syncing with the server…');
+          }
         }
 
         // If either succeeded, proceed with login & restore all past history from other devices
@@ -12602,7 +12763,11 @@ let hindiAnimeCarouselStarted = false;
         }
 
         // 2. Read from targeted Firestore named database as well
-        const remoteData = await getCloudUserData(uid);
+        // Firestore is optional and can stall; never let it hold up the login.
+        const remoteData = await Promise.race([
+          getCloudUserData(uid).catch(() => null),
+          new Promise((resolve) => setTimeout(() => resolve(null), 4000)),
+        ]);
         if (remoteData) {
           remoteProgress = { ...remoteProgress, ...(remoteData.watchProgress || {}) };
           remoteWatchlist = { ...remoteWatchlist, ...(remoteData.watchlist || {}) };
@@ -14954,5 +15119,19 @@ let hindiAnimeCarouselStarted = false;
     });
   </script>
 
+  <script>
+    // ===================== BUFFER INDICATOR =====================
+    // The running Pikachu plays whenever the native player has to fetch more of
+    // the file (waiting/stalled/seeking) and disappears as soon as it plays.
+    (function () {
+      const video = document.getElementById('videoNative');
+      const overlay = document.getElementById('bufferOverlay');
+      if (!video || !overlay) return;
+      const show = () => { if (!video.paused && !video.ended && video.style.display !== 'none') overlay.style.display = 'flex'; };
+      const hide = () => { overlay.style.display = 'none'; };
+      ['waiting', 'stalled', 'seeking', 'loadstart'].forEach((ev) => video.addEventListener(ev, show));
+      ['playing', 'canplay', 'seeked', 'pause', 'ended', 'emptied', 'error'].forEach((ev) => video.addEventListener(ev, hide));
+    })();
+  </script>
 </body>
 </html>
