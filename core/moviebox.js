@@ -676,21 +676,23 @@ const ALLOWED_CDN_HOSTS = /(\.hakunaymatata\.com|\.aoneroom\.com|\.moviebox\.ph)
 // Verified from Render's own egress through /api/diag: okhttp gets 206
 // video/mp4 with a valid Content-Range on bcdn, okhttp+Referer on bcdnxw.
 const CDN_HEADER_PROFILES = [
-  // The bcdn host the app API hands back serves an app UA with no Referer and
-  // rejects a Referer outright (nginx 429).
-  { "User-Agent": "okhttp/4.12.0", Accept: "*/*" },
+  // bcdnxw (the h5 h264 host) is the other way round: it wants the site
+  // Referer, and only then answers a datacenter egress at all. This profile
+  // is tried first as it typically provides 1080p sources.
+  {
   // bcdnxw (the h5 h264 host) is the other way round: it wants the site
   // Referer, and only then answers a datacenter egress at all.
-  {
     "User-Agent": "okhttp/4.12.0",
     Referer: `${SITE}/`,
     Origin: SITE,
     Accept: "*/*",
     "Accept-Language": "en-US,en;q=0.9",
   },
+  // The bcdn host the app API hands back serves an app UA with no Referer and
+  // rejects a Referer outright (nginx 429).
+  { "User-Agent": "okhttp/4.12.0", Accept: "*/*" },
   { "User-Agent": "node", Accept: "*/*" },
-];
-const CDN_RETRY_STATUS = new Set([403, 426, 428, 429, 451]);
+];const CDN_RETRY_STATUS = new Set([403, 426, 428, 429, 451]);
 
 export async function relayMovieboxVideo(req, res, url) {
   const target = url.searchParams.get("u");
