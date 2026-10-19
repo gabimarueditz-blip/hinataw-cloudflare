@@ -620,6 +620,19 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
   }
   sources.sort(playbackOrder);
 
+  // Server 2 leads — when this egress can actually fetch it. bcdnxw answers a
+  // datacenter IP with 429 on every header profile (verified from Render), and
+  // the player starts on sources[0], so a refused host must not lead or every
+  // title opens on a spinner. A cached 2-byte range probe decides the order:
+  // server 2 first when it answers, server 1 first when it does not.
+  const server2Source = sources.find((s) => /bcdnxw/i.test(hostOfSource(s)));
+  if (server2Source && !(await cdnHostReachable(server2Source.direct))) {
+    sources = [
+      ...sources.filter((s) => !/bcdnxw/i.test(hostOfSource(s))),
+      ...sources.filter((s) => /bcdnxw/i.test(hostOfSource(s))),
+    ];
+  }
+
   if (!data && !sources.length) {
     throw new Error(`moviebox play -> ${lastStatus || (lastErr && lastErr.message) || "unreachable"}`);
   }
@@ -643,6 +656,35 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
 // and "spinning loader". So: server 2 (bcdnxw, the 1080p host) ahead of every
 // other host, then H.264 before HEVC (browsers advertise HEVC support they
 // often cannot decode), then 480p before 720p before 360p before 1080p.
+function hostOfSource(s) {
+  try { return new URL(String(s && s.direct ? s.direct : "")).hostname; } catch { return ""; }
+}
+
+// Can this egress actually pull bytes from the host? One 2-byte Range request
+// with the same per-host header profile the relay uses; success cached for 10
+// minutes, failure for 60 seconds so a transient 429 does not demote server 2
+// for long.
+const cdnReachCache = new Map();
+async function cdnHostReachable(url) {
+  const host = hostOfSource({ direct: url });
+  if (!host) return true;
+  const hit = cdnReachCache.get(host);
+  if (hit && Date.now() - hit.at < hit.ttl) return hit.ok;
+  let ok = false;
+  for (const profile of cdnHeaderProfilesFor(host)) {
+    try {
+      const r = await fetch(viaRelay(String(url)), {
+        headers: { ...profile, Range: "bytes=0-1" },
+        signal: AbortSignal.timeout(8000),
+      });
+      try { await r.body?.cancel(); } catch {}
+      if (r.status === 200 || r.status === 206 || r.status === 416) { ok = true; break; }
+    } catch (e) {}
+  }
+  cdnReachCache.set(host, { ok, at: Date.now(), ttl: ok ? 10 * 60 * 1000 : 60 * 1000 });
+  return ok;
+}
+
 function playbackOrder(a, b) {
   // Server 2 (bcdnxw) is the primary mirror: it is the host that carries the
   // 1080p masters for most titles, and with its Referer profile it answers
