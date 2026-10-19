@@ -9,7 +9,7 @@
 //   3. Serve the two routes index.js doesn't know about (/manga, the Vercel
 //      analytics placeholder), then hand off to the stock app fetch handler.
 import { bindWorkersEnv } from "../core/doc-store.js";
-import { getMangaHtml } from "../core/index-html.js";
+import { getMangaHtml, getAdHtml } from "../core/index-html.js";
 
 let appPromise = null;
 
@@ -52,6 +52,19 @@ export default {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "public, max-age=0, must-revalidate",
+        },
+      });
+    }
+
+    // Sponsored tab the player opens for the owner ad.
+    if (path === "/ad" || path === "/ad.html") {
+      await loadApp(env);
+      return new Response(getAdHtml(), {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-Robots-Tag": "noindex",
         },
       });
     }

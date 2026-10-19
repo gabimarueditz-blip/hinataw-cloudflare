@@ -12,6 +12,9 @@ const htmlPath = path.join(rootDir, "public", "index.html");
 // The manga portal is a separate document served at /manga; on Vercel only the
 // serverless function answers, so its HTML has to travel inside the bundle too.
 const mangaPath = path.join(rootDir, "public", "manga.html");
+// The sponsored tab is its own document too: the player opens it in a new tab
+// for the owner ad, and Vercel/Render have no static public/ to serve it from.
+const adPath = path.join(rootDir, "public", "ad.html");
 const logoPath = path.join(rootDir, "public", "logo.svg");
 
 // The service worker is bundled for the same reason as the PNGs: Vercel only
@@ -29,6 +32,7 @@ const outputPath = path.join(rootDir, "core", "index-html.js");
 try {
   const html = fs.readFileSync(htmlPath, "utf8");
   const mangaHtml = fs.existsSync(mangaPath) ? fs.readFileSync(mangaPath, "utf8") : "";
+  const adHtml = fs.existsSync(adPath) ? fs.readFileSync(adPath, "utf8") : "";
   const logo = fs.readFileSync(logoPath, "utf8");
   const sw = fs.readFileSync(swPath, "utf8");
 
@@ -52,6 +56,7 @@ try {
   const htmlB64 = Buffer.from(htmlWithAnalytics).toString("base64");
   // No analytics injection here: the manga portal is a plain reader page.
   const mangaB64 = Buffer.from(mangaHtml).toString("base64");
+  const adB64 = Buffer.from(adHtml).toString("base64");
 
   // Only the <Analytics /> component is React-rendered; the rest of the page
   // is shipped verbatim, so the build output is byte-for-byte stable and any
@@ -73,12 +78,14 @@ try {
   const content = `// Auto-generated bundle of frontend assets for Vercel and Serverless deployments
 export const INDEX_HTML_B64 = "${htmlB64}";
 export const MANGA_HTML_B64 = "${mangaB64}";
+export const AD_HTML_B64 = "${adB64}";
 export const LOGO_SVG_B64 = "${logoB64}";
 export const SW_JS_B64 = "${swB64}";
 export const PNG_ASSETS_B64 = ${JSON.stringify(pngB64, null, 2)};
 
 let _html = null;
 let _manga = null;
+let _ad = null;
 let _logo = null;
 let _sw = null;
 let _png = null;
@@ -91,6 +98,11 @@ export function getIndexHtml() {
 export function getMangaHtml() {
   if (_manga === null) _manga = Buffer.from(MANGA_HTML_B64, "base64").toString("utf8");
   return _manga;
+}
+
+export function getAdHtml() {
+  if (_ad === null) _ad = Buffer.from(AD_HTML_B64, "base64").toString("utf8");
+  return _ad;
 }
 
 export function getLogoSvg() {
@@ -115,7 +127,7 @@ export function getPngAsset(name) {
 
   fs.writeFileSync(outputPath, content, "utf8");
   const bundled = pngAssets.filter((n) => pngB64[n]).join(", ") || "none";
-  console.log(`[build] Bundled frontend assets (${htmlWithAnalytics.length} bytes HTML incl. <Analytics />, ${mangaHtml.length} bytes manga.html, ${sw.length} bytes sw.js, PNG: ${bundled}) -> ${outputPath}`);
+  console.log(`[build] Bundled frontend assets (${htmlWithAnalytics.length} bytes HTML incl. <Analytics />, ${mangaHtml.length} bytes manga.html, ${adHtml.length} bytes ad.html, ${sw.length} bytes sw.js, PNG: ${bundled}) -> ${outputPath}`);
 } catch (err) {
   console.error("[build] Failed to bundle frontend:", err);
   process.exit(1);

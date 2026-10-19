@@ -640,16 +640,19 @@ export async function fetchMovieboxStream({ subjectId, detailPath, se = 1, ep = 
 // Which source the player should start on. Metadata sits at the head of these
 // MP4s, but a 1080p HEVC master still needs a multi-megabyte moov before it
 // renders, and on a small host that is the whole difference between "plays"
-// and "spinning loader". So: H.264 before HEVC (browsers advertise HEVC support
-// they often cannot decode), 480p before 720p before 360p before 1080p, and
-// anything above 720p demoted behind the mirrors that actually start.
+// and "spinning loader". So: server 2 (bcdnxw, the 1080p host) ahead of every
+// other host, then H.264 before HEVC (browsers advertise HEVC support they
+// often cannot decode), then 480p before 720p before 360p before 1080p.
 function playbackOrder(a, b) {
-  // bcdnxw is the h5 player's h264 host and refuses datacenter egress outright
-  // (426 from Render), while the app's bcdn links stream fine there. Reachable
-  // first, then HEVC last (a 1080p HEVC master needs a multi-megabyte moov
-  // before it renders), then the resolution closest to 480p so playback starts
-  // instead of buffering a 1080p file.
-  const GATED_HOST = /bcdnxw|bcdnxw2/i;
+  // Server 2 (bcdnxw) is the primary mirror: it is the host that carries the
+  // 1080p masters for most titles, and with its Referer profile it answers
+  // this egress (verified live). Its sources therefore lead every other host —
+  // the player starts on the first entry, so demoting them here is what kept
+  // 1080p out of reach even when the relay could fetch it. Within a host,
+  // H.264 still beats HEVC (a 1080p HEVC master needs a multi-megabyte moov
+  // before it renders) and the resolution closest to 480p still comes first so
+  // playback starts instead of buffering a master.
+  const SERVER2_HOST = /bcdnxw/i;
   const hostOf = (s) => {
     try { return new URL(String(s && s.direct ? s.direct : "")).hostname; } catch { return ""; }
   };
@@ -657,7 +660,7 @@ function playbackOrder(a, b) {
     const u = String(s && s.direct ? s.direct : "").toLowerCase();
     const hevc = /h265|x265|hev1|hvc1/.test(u);
     const res = Number(s && s.resolution) || 0;
-    return (GATED_HOST.test(hostOf(s)) ? 8 : 0) + (hevc ? 2 : 0) + (res > 720 ? 1 : 0);
+    return (SERVER2_HOST.test(hostOf(s)) ? 0 : 4) + (hevc ? 2 : 0) + (res > 720 ? 1 : 0);
   };
   const byRank = rank(a) - rank(b);
   if (byRank) return byRank;
@@ -669,30 +672,39 @@ function playbackOrder(a, b) {
 const ALLOWED_CDN_HOSTS = /(\.hakunaymatata\.com|\.aoneroom\.com|\.moviebox\.ph)$/i;
 
 // The video CDN gates on the client, never on us: a browser UA is answered
-// 428/426 (the paywall the web player trips) on every host, so the relay has
+// 426/429 (the paywall the web player trips) on every host, so the relay has
 // to look like the mobile app. What each host then wants differs — bcdn serves
-// an app UA with no Referer and rejects a Referer, bcdnxw needs the site
-// Referer — so profiles are tried in order instead of guessing per host.
-// Verified from Render's own egress through /api/diag: okhttp gets 206
-// video/mp4 with a valid Content-Range on bcdn, okhttp+Referer on bcdnxw.
-const CDN_HEADER_PROFILES = [
-  // bcdnxw (the h5 h264 host) is the other way round: it wants the site
-  // Referer, and only then answers a datacenter egress at all. This profile
-  // is tried first as it typically provides 1080p sources.
-  {
-  // bcdnxw (the h5 h264 host) is the other way round: it wants the site
-  // Referer, and only then answers a datacenter egress at all.
-    "User-Agent": "okhttp/4.12.0",
-    Referer: `${SITE}/`,
-    Origin: SITE,
-    Accept: "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-  },
-  // The bcdn host the app API hands back serves an app UA with no Referer and
-  // rejects a Referer outright (nginx 429).
-  { "User-Agent": "okhttp/4.12.0", Accept: "*/*" },
-  { "User-Agent": "node", Accept: "*/*" },
-];const CDN_RETRY_STATUS = new Set([403, 426, 428, 429, 451]);
+// an app UA with no Referer and rejects a Referer outright (nginx 429), while
+// server 2 (bcdnxw) needs the site Referer and refuses everything else.
+//
+// So the profile list is chosen *per host* rather than globally: sending the
+// wrong profile first costs a wasted 429 on every range request and walks
+// straight into the host's rate limiter. Verified live: okhttp -> 206
+// video/mp4 on bcdn, okhttp+Referer -> 206 video/mp4 on bcdnxw, browser UA
+// (with the page Referer the player sends) -> 429 on both.
+const CDN_PROFILE_REFERER = {
+  "User-Agent": "okhttp/4.12.0",
+  Referer: `${SITE}/`,
+  Origin: SITE,
+  Accept: "*/*",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+const CDN_PROFILE_APP = { "User-Agent": "okhttp/4.12.0", Accept: "*/*" };
+const CDN_PROFILE_NODE = { "User-Agent": "node", Accept: "*/*" };
+
+// Server 2 (bcdnxw) is the primary mirror — it is the host that carries the
+// 1080p masters — so its profile leads for its own hosts and never leaks onto
+// bcdn, which answers that Referer with 429. The app/NODE profiles stay behind
+// it as failover for a rotated UA.
+function cdnHeaderProfilesFor(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  if (/bcdnxw/.test(host)) {
+    return [CDN_PROFILE_REFERER, CDN_PROFILE_APP, CDN_PROFILE_NODE];
+  }
+  return [CDN_PROFILE_APP, CDN_PROFILE_NODE];
+}
+
+const CDN_RETRY_STATUS = new Set([403, 426, 428, 429, 451]);
 
 export async function relayMovieboxVideo(req, res, url) {
   const target = url.searchParams.get("u");
@@ -716,7 +728,7 @@ export async function relayMovieboxVideo(req, res, url) {
   let upstream = null;
   let lastStatus = 0;
   let lastErr = null;
-  for (const profile of CDN_HEADER_PROFILES) {
+  for (const profile of cdnHeaderProfilesFor(parsed.hostname)) {
     const headers = { ...profile };
     if (req.headers.range) headers.Range = req.headers.range;
     try {

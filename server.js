@@ -21,11 +21,19 @@ import worker from "./index.js";
 import { handleAnimeApi } from "./core/anime-router.js";
 import { initHiAnimeSyncEngine } from "./core/hianime-sync.js";
 import { fetchMovieboxHome } from "./core/moviebox.js";
-import { getIndexHtml, getMangaHtml } from "./core/index-html.js";
+import { getIndexHtml, getMangaHtml, getAdHtml } from "./core/index-html.js";
 
 const PORT  = Number(process.env.PORT) || 3000;
 const BASE  = process.env.BASE_PATH ?? "";
 const __dir = dirname(fileURLToPath(import.meta.url));
+
+// The bundled page carries the <Analytics/> tag Vercel injects, so every
+// deploy asks for /_vercel/insights/script.js. Only Vercel serves it; without a
+// route here the HTML catch-all answered with index.html and the browser parsed
+// that markup as JavaScript ("Uncaught SyntaxError: Unexpected token '<'" on
+// every load). The Worker entry already ships this exact placeholder.
+const ANALYTICS_STUB =
+  "/* analytics placeholder — active on Vercel */";
 
 const STATIC = {
   "/":               { inline: true },
@@ -33,6 +41,10 @@ const STATIC = {
   "/app":            { inline: true },
   // The manga portal is its own document, opened in a new tab.
   "/manga.html":     { inlineManga: true },
+  // Sponsored tab the player opens for the owner ad (the tag lives there, not
+  // on the page the viewer is watching).
+  "/ad":             { inlineAd: true },
+  "/ad.html":        { inlineAd: true },
   "/docs":           { file: "docs/index.html",   mime: "text/html" },
   "/docs/":          { file: "docs/index.html",   mime: "text/html" },
   "/api-home":       { file: "docs/landing.html", mime: "text/html" },
@@ -41,14 +53,23 @@ const STATIC = {
   "/logo.svg":       { file: "docs/logo.svg",     mime: "image/svg+xml" },
   "/docs/logo.svg":  { file: "docs/logo.svg",     mime: "image/svg+xml" },
   "/sw.js":          { file: "public/sw.js",     mime: "application/javascript" },
+  "/_vercel/insights/script.js": { js: ANALYTICS_STUB },
   // Buffer loader art (transparent GIF) served from disk like sw.js.
   "/pikachu-buffer.gif": { file: "public/pikachu-buffer.gif", mime: "image/gif" },
 };
 
 function serveStatic(req, res, entry) {
-  if (entry.inline || entry.inlineManga) {
+  if (entry.js) {
+    res.writeHead(200, {
+      "Content-Type":  "application/javascript; charset=utf-8",
+      "Cache-Control": "public, max-age=3600",
+      "Content-Length": Buffer.byteLength(entry.js),
+    });
+    return req.method === "HEAD" ? res.end() : res.end(entry.js);
+  }
+  if (entry.inline || entry.inlineManga || entry.inlineAd) {
     try {
-      const body = entry.inlineManga ? getMangaHtml() : getIndexHtml();
+      const body = entry.inlineAd ? getAdHtml() : entry.inlineManga ? getMangaHtml() : getIndexHtml();
       res.writeHead(200, {
         "Content-Type":  "text/html; charset=utf-8",
         "Cache-Control": "no-cache",

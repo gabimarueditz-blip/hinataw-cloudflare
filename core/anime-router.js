@@ -2249,15 +2249,46 @@ export async function handleAnimeApi(req, res) {
         searchAnime(q).catch(() => []),
         Promise.resolve(searchSyncedAnime(q)).catch(() => [])
       ]);
-      const seen = new Set();
-      const results = [];
+      // The two catalogs use different ids for the same show (AniList id vs
+      // HiAnime id), so an id-only dedupe let duplicates through and left the
+      // exact match buried behind loosely-related titles. Match on the
+      // normalized title instead, keep the entry carrying the fuller payload
+      // (poster/episode count/score), and rank exact → prefix → contains so the
+      // obvious answer is the first card.
+      const norm = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const titleOf = (it) => {
+        const t = it && it.title;
+        if (typeof t === "string") return t;
+        return (t && (t.english || t.romaji)) || (it && (it.titleStr || it.name || it.jname)) || "";
+      };
+      const scoreOf = (it) => {
+        let s = 0;
+        if (it && (it.coverImage || it.poster || it.image)) s += 2;
+        if (it && (it.episodes || it.totalEpisodes)) s += 1;
+        if (it && it.averageScore) s += 1;
+        return s;
+      };
+      const key = norm(q);
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rank = (it) => {
+        const t = norm(titleOf(it));
+        if (!t) return 9;
+        if (t === key) return 0;
+        if (t.startsWith(key)) return 1;
+        if (key && new RegExp(`\\b${escaped}\\b`).test(t)) return 2;
+        if (t.includes(key)) return 3;
+        return 4;
+      };
+      const byTitle = new Map();
       for (const item of [...anilistResults, ...syncedResults]) {
-        const idKey = String(item.id || item.hianimeId || item.title?.english || item.titleStr || "");
-        if (idKey && !seen.has(idKey)) {
-          seen.add(idKey);
-          results.push(item);
-        }
+        const k = norm(titleOf(item));
+        if (!k) continue;
+        const prev = byTitle.get(k);
+        if (!prev || scoreOf(item) > scoreOf(prev)) byTitle.set(k, item);
       }
+      const results = [...byTitle.values()]
+        .sort((a, b) => rank(a) - rank(b) || scoreOf(b) - scoreOf(a))
+        .slice(0, 40);
       res.statusCode = 200;
       return res.end(JSON.stringify({ query: q, count: results.length, results }));
     } catch (err) {

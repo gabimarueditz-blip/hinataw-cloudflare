@@ -27,40 +27,54 @@
         ));
       } catch (e) { return new Map(); }
     }
+    // Recorded only once an ad actually fired. The key used to be written before
+    // the popup was attempted, so one blocked popup marked the episode as done
+    // and that episode could never run its ad again — silently costing revenue
+    // with nothing to show the viewer.
+    function rememberOwnerAd(key) {
+      try {
+        const fired = ownerAdKeys();
+        fired.set(key, Date.now());
+        localStorage.setItem(OWNER_AD_KEYS_STORE, JSON.stringify([...fired].slice(-300)));
+      } catch (e) {}
+    }
     function fireOwnerAd(key) {
       try {
         if (!key) return false;
-        const fired = ownerAdKeys();
-        if (fired.has(key)) return false;
-        fired.set(key, Date.now());
-        try {
-          localStorage.setItem(OWNER_AD_KEYS_STORE, JSON.stringify([...fired].slice(-300)));
-        } catch (e) {}
+        if (ownerAdKeys().has(key)) return false;
         const parked = document.getElementById('ownerAdTag');
         if (!parked) return false;
         const code = String(parked.textContent || '').trim();
         if (!code) return false;
-        // The popunder runs in its own blank tab, opened while the click that
-        // armed it is still active, so the browser allows it. Whatever the
-        // network does next — redirect, more popups — happens in that tab: the
-        // page the viewer is watching keeps playing and their Back button still
-        // leaves for the previous site instead of closing ours.
+        // The ad runs in its own real tab (/ad.html), opened while the click
+        // that armed it is still active. A real page — not a written-into
+        // about:blank — is what lets the tag load and serve; and because it is
+        // a separate tab, whatever the network does next (redirect, more
+        // popups) happens there. The player keeps playing and this page's Back
+        // history is never touched.
         let adTab = null;
-        try { adTab = window.open('about:blank', '_blank'); } catch (e) { adTab = null; }
-        if (adTab && adTab.document) {
-          try {
-            adTab.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Hinataw.exe</title></head><body></body></html>');
-            adTab.document.close();
-            const live = adTab.document.createElement('script');
-            live.textContent = code;
-            adTab.document.body.appendChild(live);
-            try { adTab.focus(); window.focus(); } catch (e) {}
-            return true;
-          } catch (e) { /* fall through to the sandboxed frame below */ }
+        try { adTab = window.open('/ad.html?k=' + encodeURIComponent(key), '_blank'); } catch (e) { adTab = null; }
+        // Sever the link to this page before any ad code runs: a popunder can
+        // navigate window.opener, and that is exactly how an ad "closes" the
+        // site or replaces the player. With opener nulled the ad tab is a
+        // sandbox of its own — the viewer's tab and its Back history stay put.
+        try { if (adTab) adTab.opener = null; } catch (e) {}
+        if (adTab) {
+          // Bring the sponsored tab forward once so the ad is actually seen;
+          // the player is not paused and keeps its own tab/history intact.
+          try { adTab.focus(); } catch (e) {}
+          rememberOwnerAd(key);
+          return true;
         }
-        // Popups blocked: the tag runs in a sandboxed frame instead. The sandbox
-        // refuses top navigation, so a popunder that cannot open a window can
-        // never replace the page the viewer is on.
+        // Popups blocked while the viewer's gesture is still live (the click
+        // that brought us here): the tag gets its run in a sandboxed frame,
+        // which refuses top navigation so a popunder can never replace the page
+        // the viewer is on. Without a live gesture — openPlayer is often reached
+        // after an await, where a window cannot open at all — the attempt is
+        // skipped and the key stays unrecorded, so the next real click can still
+        // fire a popup instead of being silently burnt here.
+        const activation = navigator.userActivation;
+        if (activation && !activation.isActive) return false;
         const frame = document.createElement('iframe');
         frame.setAttribute('title', 'sponsor');
         frame.setAttribute('aria-hidden', 'true');
@@ -69,10 +83,11 @@
         frame.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;';
         const openTag = '<scr' + 'ipt>';
         const closeTag = '</scr' + 'ipt>';
-        const safe = code.split('</script').join('</script');
+        const safe = code.split('</script').join('<\\/script');
         frame.srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>' + openTag + safe + closeTag + '</body></html>';
         document.body.appendChild(frame);
         window.setTimeout(() => { try { frame.remove(); } catch (e) {} }, 30000);
+        rememberOwnerAd(key);
         return true;
       } catch (e) { return false; }
     }
@@ -778,7 +793,7 @@
       overflow: hidden;
       /* Shorter highlight banner: the slides keep sliding, the box they
          slide inside is just less tall. */
-      min-height: 340px;
+      min-height: 280px;
       display: flex;
       align-items: flex-end;
       border: 1px solid var(--border);
@@ -807,7 +822,7 @@
     .hero-content {
       position: relative;
       z-index: 10;
-      padding: 34px;
+      padding: 26px 30px;
       max-width: 720px;
       transition: opacity 0.45s ease-in-out, transform 0.45s ease-in-out;
       /* The scrim is intentionally light so the poster reads clearly, so the
@@ -3594,7 +3609,7 @@
        document wider than the viewport (the "stretched/pinched" layout). */
     @media (max-width: 768px) {
       /* Give the hero room so the slider controls never sit on the buttons. */
-      .hero-banner { min-height: 360px; }
+      .hero-banner { min-height: 300px; }
       .hero-content { padding: 24px 20px 66px; }
       .hero-slider-controls { bottom: 16px; }
       .topbar {
@@ -5658,8 +5673,10 @@
     }
   </style>
 
-  <!-- Ad-block notice: shown only when the bait probe fails, and only until
-       ads are allowed again (the check re-runs while it is open). -->
+  <!-- Ad-block notice: shown only when the bait probe fails, and it stays up
+       until ads are allowed again (the probe re-runs every 3s, so switching the
+       blocker off drops it instantly). The site runs on the owner tag, so a
+       blocked viewer gets this notice instead of the catalogue. -->
   <div id="adBlockGate" role="dialog" aria-modal="true" aria-labelledby="adBlockTitle">
     <div class="adblock-card">
       <h2 id="adBlockTitle">Please allow ads to use Hinataw.exe</h2>
@@ -7904,7 +7921,9 @@
     let trendingCarouselData = [];
     let currentCarouselIndex = 0;
     let carouselAutoplayTimer = null;
-    let isCarouselAutoplay = true;
+    // Carousels never auto-advance: they move only when the viewer asks (arrow,
+    // dot or swipe). The slide transition itself is untouched.
+    let isCarouselAutoplay = false;
     let carouselTouchStartX = 0;
     let carouselTouchEndX = 0;
     let isCarouselDragging = false;
@@ -8402,15 +8421,11 @@ let heroSwapTimer = null;
       if (heroAutoplayTimer) { clearInterval(heroAutoplayTimer); heroAutoplayTimer = null; }
     }
 
+    // The spotlight (and every other carousel) only moves on a viewer action.
+    // The crossfade/slide animation stays: nextHero/prevHero/goToHero still call
+    // renderHero, which drives the .hero-content.swapping transition.
     function restartHeroAutoplay() {
       stopHeroAutoplay();
-      if (heroPaused || !currentFeatured || currentFeatured.length < 2) return;
-      heroAutoplayTimer = setInterval(() => {
-        currentHeroIndex = (currentHeroIndex + 1) % currentFeatured.length;
-        renderHero(currentFeatured[currentHeroIndex]);
-        renderHeroThumbs(currentFeatured);
-        updateHeroDots();
-      }, HERO_SLIDE_MS);
     }
 
     
@@ -9927,7 +9942,9 @@ let hindiAnimeCarouselStarted = false;
             seen.add(k);
             return true;
           });
-          // Skip hianimeHasTitle verification - use MovieBox [Hindi] tagged titles directly
+          // Every candidate is HiAnime-verified just below (catalog pass, or
+          // per-title search when the catalog is thin), so a live-action show
+          // tagged [Hindi] cannot reach the row.
           const fallback = candidates;
           if (fallback.length) items.push(...fallback);
         }
@@ -9962,8 +9979,36 @@ let hindiAnimeCarouselStarted = false;
               // library's raw name carries release junk) plus the language tag.
               if (key) matched.push({ ...it, title: known.get(key) + " [Hindi]" });
             }
-            if (matched.length >= 5) items = matched;
+            // Strict: only titles HiAnime carries survive. The old
+            // "keep everything when fewer than 5 matched" rule is what put
+            // live-action series in a row called "Hindi Anime".
+            const seenMatch = new Set();
+            items = matched.filter((it) => {
+              const k = _normTitle(it.title);
+              if (!k || seenMatch.has(k)) return false;
+              seenMatch.add(k);
+              return true;
+            });
+          } else {
+            // Catalog unavailable: verify candidates against HiAnime's search
+            // (fuzzy, so compare normalized names) with bounded concurrency and
+            // keep only real HiAnime titles. Better a short row than a row of
+            // shows HiAnime does not carry at all.
+            const checked = await filterByConcurrency(items.slice(0, 60), 5, async (it) => {
+              const ok = await hianimeHasTitle(stripTag(it));
+              const name = stripTag(it);
+              return ok && name ? { ...it, title: name + " [Hindi]" } : null;
+            });
+            const seenVerified = new Set();
+            items = checked.filter((it) => {
+              if (!it) return false;
+              const k = _normTitle(it.title);
+              if (!k || seenVerified.has(k)) return false;
+              seenVerified.add(k);
+              return true;
+            });
           }
+          if (!items.length) throw new Error('no HiAnime matches');
         } catch (e) {}        initCategoryCarousel('hindi-anime-list', items);
         updateCarouselHeading('hindi-anime-list', 'Hindi Anime');
       } catch (e) {
@@ -10703,11 +10748,16 @@ let hindiAnimeCarouselStarted = false;
       if (anime) {
         openPlayer(anime, targetEp, null, resumeTime);
       } else {
-        // HiAnime/AniList titles are resolved through the details API.
+        // HiAnime/AniList titles are resolved through the details API. The ad is
+        // armed here, while the click's gesture is still live: by the time the
+        // fetch resolves the browser refuses a popup, so firing it inside
+        // openPlayer() would only ever hit the invisible fallback. The 5th
+        // argument tells openPlayer the ad was already handled.
+        fireOwnerAd('ep:' + id + ':' + targetEp);
         fetch(`/api/anime/details?id=${id}`)
           .then(r => r.json())
           .then(data => {
-            if (data.anime) openPlayer(data.anime, targetEp, null, resumeTime);
+            if (data.anime) openPlayer(data.anime, targetEp, null, resumeTime, true);
           })
           .catch(() => {});
       }

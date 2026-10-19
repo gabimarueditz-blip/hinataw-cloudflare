@@ -34,6 +34,34 @@ const FORWARD_REQUEST_HEADERS = [
   "user-agent",
 ];
 
+// The player's browser cannot fetch the video CDN itself: a browser UA — and
+// the page Referer a <video> request carries — is answered 429 on EVERY host.
+// Forwarding the client's identity headers therefore made every MovieBox
+// stream fail through this relay, so for CDN targets the client's gating
+// headers are dropped and the profile the host actually accepts is substituted
+// (the same split the Node proxy uses in core/moviebox.js): server 2 (bcdnxw)
+// wants okhttp + the site Referer, bcdn wants okhttp and no Referer at all.
+const CDN_HOST = /\.hakunaymatata\.com$/i;
+const CDN_CLIENT_HEADERS = ["user-agent", "referer", "origin", "accept", "accept-language"];
+const CDN_PROFILE_REFERER = {
+  "user-agent": "okhttp/4.12.0",
+  referer: "https://moviebox.ph/",
+  origin: "https://moviebox.ph",
+  accept: "*/*",
+  "accept-language": "en-US,en;q=0.9",
+};
+const CDN_PROFILE_APP = { "user-agent": "okhttp/4.12.0", accept: "*/*" };
+const CDN_GATE_STATUS = new Set([403, 426, 428, 429, 451]);
+
+// Server 2 (bcdnxw) is the primary mirror and carries the 1080p masters, so it
+// is tried first for its own hosts. bcdn rejects a Referer outright, so it is
+// only ever offered the app profile.
+function cdnProfilesFor(hostname) {
+  return /bcdnxw/i.test(String(hostname || ""))
+    ? [CDN_PROFILE_REFERER, CDN_PROFILE_APP]
+    : [CDN_PROFILE_APP];
+}
+
 const FORWARD_RESPONSE_HEADERS = [
   "content-type",
   "content-length",
@@ -78,23 +106,50 @@ export default async function handler(req, res) {
     return res.end("Host not allowed");
   }
 
-  const headers = {};
+  const isCdn = CDN_HOST.test(parsed.hostname);
+  const baseHeaders = {};
   for (const name of FORWARD_REQUEST_HEADERS) {
+    if (isCdn && CDN_CLIENT_HEADERS.includes(name)) continue;
     const value = req.headers[name];
-    if (value !== undefined) headers[name] = value;
+    if (value !== undefined) baseHeaders[name] = value;
   }
 
-  let upstream;
-  try {
-    upstream = await fetch(parsed.toString(), {
-      method: "GET",
-      headers,
-      redirect: "follow",
-      signal: AbortSignal.timeout(120000),
-    });
-  } catch (err) {
-    res.statusCode = 502;
-    return res.end("Upstream error: " + (err && err.message));
+  const profiles = isCdn ? cdnProfilesFor(parsed.hostname) : [null];
+  let upstream = null;
+  let lastStatus = 0;
+  let lastErr = null;
+  for (let i = 0; i < profiles.length; i++) {
+    const profile = profiles[i];
+    const headers = profile ? { ...baseHeaders, ...profile } : baseHeaders;
+    const last = i === profiles.length - 1;
+    try {
+      const r = await fetch(parsed.toString(), {
+        method: "GET",
+        headers,
+        redirect: "follow",
+        signal: AbortSignal.timeout(120000),
+      });
+      // A gate answer on a profile that has an alternative left is retried;
+      // the last profile's answer is passed through as-is (404/gate alike) so
+      // the player sees the real reason instead of a generic 502.
+      if (last || !CDN_GATE_STATUS.has(r.status)) {
+        upstream = r;
+        break;
+      }
+      lastStatus = r.status;
+      try { await r.body?.cancel(); } catch {}
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  if (!upstream) {
+    res.statusCode = lastStatus || 502;
+    return res.end(
+      lastErr && !lastStatus
+        ? "Upstream error: " + (lastErr && lastErr.message)
+        : "CDN declined the request (" + (lastStatus || "unreachable") + ")",
+    );
   }
 
   res.statusCode = upstream.status;
