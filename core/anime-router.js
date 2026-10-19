@@ -574,6 +574,12 @@ async function getMovieboxLibrarySeed() {
   return [];
 }
 
+// MovieBox's Hindi pool is mostly live-action, so the rows that promise
+// anime can only be trusted after checking the genre the catalogue returns.
+function looksLikeAnimeItem(it) {
+  return /anime|animation|donghua|cartoon/i.test(String((it && it.genre) || ""));
+}
+
 async function getMovieboxHindiCatalog(type = "all") {
   if (!movieboxHindiFallback.items.length || Date.now() - movieboxHindiFallback.at >= MOVIEBOX_HINDI_FALLBACK_TTL) {
     const results = await searchMoviebox("hindi").catch(() => []);
@@ -590,6 +596,8 @@ async function getMovieboxHindiCatalog(type = "all") {
         rating: String(it.rating || ""),
         quality: "",
         type: it.type === "movie" ? "movie" : "series",
+        genre: String(it.genre || ""),
+        badge: String(it.badge || ""),
         url: "",
         source: "moviebox",
       }));
@@ -610,6 +618,8 @@ async function getMovieboxHindiCatalog(type = "all") {
           rating: String(it.rating || ""),
           quality: "",
           type: it.type === "movie" ? "movie" : "series",
+          genre: String(it.genre || ""),
+          badge: String(it.badge || ""),
           url: "",
           source: "moviebox",
         }));
@@ -1263,7 +1273,10 @@ export async function handleAnimeApi(req, res) {
     if (!finalIndiaSeries.length || !finalIndiaMovies.length) {
       const fallbackRows = await getMovieboxHindiCatalog().catch(() => []);
       if (!finalIndiaSeries.length) {
-        finalIndiaSeries = fallbackRows.filter((it) => it.type === "series").slice(0, 12);
+        const seriesRows = fallbackRows.filter((it) => it.type === "series");
+        finalIndiaSeries = (seriesRows.some(looksLikeAnimeItem)
+          ? seriesRows.filter(looksLikeAnimeItem)
+          : seriesRows).slice(0, 12);
       }
       if (!finalIndiaMovies.length) {
         finalIndiaMovies = fallbackRows.filter((it) => it.type === "movie").slice(0, 12);
@@ -1412,7 +1425,10 @@ export async function handleAnimeApi(req, res) {
           },
         }));
       }
-      const mboxSeries = await getMovieboxHindiCatalog("series").catch(() => []);
+      const mboxSeriesRaw = await getMovieboxHindiCatalog("series").catch(() => []);
+      const mboxSeries = mboxSeriesRaw.some(looksLikeAnimeItem)
+        ? mboxSeriesRaw.filter(looksLikeAnimeItem)
+        : mboxSeriesRaw;
       res.statusCode = 200;
       return res.end(JSON.stringify({
         success: true, page, series: mboxSeries,
@@ -1491,12 +1507,19 @@ export async function handleAnimeApi(req, res) {
       // Same fallback as /api/india/series: the MovieBox-Hindi catalogue keeps
       // the library grid usable on hosts where gokuhd/animahd are blocked.
       const mboxCatalog = await getMovieboxHindiCatalog(type === "series" || type === "movie" ? type : "all").catch(() => []);
+      // The Hindi Anime row is the only consumer of type=series, and the
+      // Hindi pool carries live-action drama too, so that row keeps anime
+      // genres only — with the unfiltered list as a last resort so it can
+      // never come back empty.
+      const mboxItems = type === "series" && mboxCatalog.some(looksLikeAnimeItem)
+        ? mboxCatalog.filter(looksLikeAnimeItem)
+        : mboxCatalog;
       res.statusCode = 200;
       return res.end(JSON.stringify({
         success: true,
-        items: mboxCatalog.slice(0, perPage),
-        total: mboxCatalog.length,
-        totalPages: Math.max(1, Math.ceil(mboxCatalog.length / perPage)),
+        items: mboxItems.slice(0, perPage),
+        total: mboxItems.length,
+        totalPages: Math.max(1, Math.ceil(mboxItems.length / perPage)),
         page,
         type,
       }));
