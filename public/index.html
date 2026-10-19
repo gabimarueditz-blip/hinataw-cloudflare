@@ -38,9 +38,41 @@
         } catch (e) {}
         const parked = document.getElementById('ownerAdTag');
         if (!parked) return false;
-        const live = document.createElement('script');
-        live.textContent = parked.textContent || '';
-        document.body.appendChild(live);
+        const code = String(parked.textContent || '').trim();
+        if (!code) return false;
+        // The popunder runs in its own blank tab, opened while the click that
+        // armed it is still active, so the browser allows it. Whatever the
+        // network does next — redirect, more popups — happens in that tab: the
+        // page the viewer is watching keeps playing and their Back button still
+        // leaves for the previous site instead of closing ours.
+        let adTab = null;
+        try { adTab = window.open('about:blank', '_blank'); } catch (e) { adTab = null; }
+        if (adTab && adTab.document) {
+          try {
+            adTab.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Hinataw.exe</title></head><body></body></html>');
+            adTab.document.close();
+            const live = adTab.document.createElement('script');
+            live.textContent = code;
+            adTab.document.body.appendChild(live);
+            try { adTab.focus(); window.focus(); } catch (e) {}
+            return true;
+          } catch (e) { /* fall through to the sandboxed frame below */ }
+        }
+        // Popups blocked: the tag runs in a sandboxed frame instead. The sandbox
+        // refuses top navigation, so a popunder that cannot open a window can
+        // never replace the page the viewer is on.
+        const frame = document.createElement('iframe');
+        frame.setAttribute('title', 'sponsor');
+        frame.setAttribute('aria-hidden', 'true');
+        frame.setAttribute('tabindex', '-1');
+        frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox');
+        frame.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;';
+        const openTag = '<scr' + 'ipt>';
+        const closeTag = '</scr' + 'ipt>';
+        const safe = code.split('</script').join('</script');
+        frame.srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>' + openTag + safe + closeTag + '</body></html>';
+        document.body.appendChild(frame);
+        window.setTimeout(() => { try { frame.remove(); } catch (e) {} }, 30000);
         return true;
       } catch (e) { return false; }
     }
@@ -54,6 +86,22 @@
       if (el) fireOwnerAd('portal:anime-to-manga');
     }, true);
   </script>
+  <style>
+    /* Ad-block notice: the site runs on the one owner tag, so a blocked
+       viewer is asked to allow ads before the page is usable. */
+    #adBlockGate {
+      position: fixed; inset: 0; z-index: 100000; display: none;
+      align-items: center; justify-content: center; padding: 24px;
+      background: rgba(6, 6, 12, 0.96); backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px); text-align: center;
+    }
+    #adBlockGate.open { display: flex; }
+    .adblock-card { max-width: 460px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 16px; padding: 28px 24px; }
+    .adblock-card h2 { font-family: 'Syne', sans-serif; color: var(--accent); font-size: 20px; margin-bottom: 10px; }
+    .adblock-card p { color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 8px; }
+    .adblock-card button { margin-top: 16px; padding: 11px 22px; border-radius: 22px; background: var(--accent); color: #fff; font-weight: 700; }
+    #adBlockGate .adblock-tiny { font-size: 12px; color: var(--text-faint); margin-top: 12px; }
+  </style>
   <style>
     /* Buffering: the owner's running-Pikachu GIF (transparent) is the buffer
        loader, in both the resolver and the player itself. */
@@ -370,8 +418,10 @@
        ======================================================== */
     .spotlight-slider-section {
       position: relative;
-      height: 520px;
-      min-height: 520px;
+      /* Shorter hero banner (was 520px). The slide animation itself is
+         untouched: only the box the slides move inside got shorter. */
+      height: 400px;
+      min-height: 400px;
       border-radius: 16px;
       overflow: hidden;
       margin: 18px 0 28px;
@@ -726,7 +776,9 @@
       margin: 16px 0 30px;
       border-radius: 16px;
       overflow: hidden;
-      min-height: 420px;
+      /* Shorter highlight banner: the slides keep sliding, the box they
+         slide inside is just less tall. */
+      min-height: 340px;
       display: flex;
       align-items: flex-end;
       border: 1px solid var(--border);
@@ -3542,7 +3594,7 @@
        document wider than the viewport (the "stretched/pinched" layout). */
     @media (max-width: 768px) {
       /* Give the hero room so the slider controls never sit on the buttons. */
-      .hero-banner { min-height: 470px; }
+      .hero-banner { min-height: 360px; }
       .hero-content { padding: 24px 20px 66px; }
       .hero-slider-controls { bottom: 16px; }
       .topbar {
@@ -5606,6 +5658,59 @@
     }
   </style>
 
+  <!-- Ad-block notice: shown only when the bait probe fails, and only until
+       ads are allowed again (the check re-runs while it is open). -->
+  <div id="adBlockGate" role="dialog" aria-modal="true" aria-labelledby="adBlockTitle">
+    <div class="adblock-card">
+      <h2 id="adBlockTitle">Please allow ads to use Hinataw.exe</h2>
+      <p>An ad blocker is hiding the ads this site runs on, so playback and the catalogue are paused for you.</p>
+      <p>Turn the blocker off (or allow this site), then press the button below.</p>
+      <button type="button" onclick="recheckAdBlockGate()">I turned it off</button>
+      <p class="adblock-tiny">A refresh also works.</p>
+    </div>
+  </div>
+  <script>
+    // ===================== AD-BLOCK GATE =====================
+    // A bait element with the class names blockers hide is measured: if it has
+    // no size, an ad blocker is active and the gate opens. The check repeats
+    // every 3s while the gate is up so disabling the blocker lets the viewer
+    // straight in.
+    function adBlockDetected() {
+      try {
+        const bait = document.createElement('div');
+        bait.className = 'adsbox ad-banner ad-placement pub_300x250 text-ad doubleclick';
+        bait.setAttribute('data-ad-slot', 'bait');
+        bait.style.cssText = 'position:absolute!important;left:-9999px!important;top:-9999px!important;width:12px;height:12px;';
+        bait.innerHTML = '&nbsp;';
+        document.body.appendChild(bait);
+        const hidden = bait.offsetHeight === 0 || bait.offsetWidth === 0 ||
+          getComputedStyle(bait).display === 'none' || getComputedStyle(bait).visibility === 'hidden';
+        bait.remove();
+        return hidden;
+      } catch (e) { return false; }
+    }
+    let adBlockTimer = null;
+    function recheckAdBlockGate() {
+      const gate = document.getElementById('adBlockGate');
+      if (!gate) return;
+      const blocked = adBlockDetected();
+      gate.classList.toggle('open', blocked);
+      document.documentElement.style.overflow = blocked ? 'hidden' : '';
+      if (blocked && !adBlockTimer) {
+        adBlockTimer = setInterval(() => {
+          if (!adBlockDetected()) {
+            clearInterval(adBlockTimer);
+            adBlockTimer = null;
+            recheckAdBlockGate();
+          }
+        }, 3000);
+      }
+    }
+    window.recheckAdBlockGate = recheckAdBlockGate;
+    document.addEventListener('DOMContentLoaded', recheckAdBlockGate);
+    window.addEventListener('load', recheckAdBlockGate);
+  </script>
+
   <!-- Firebase Compat App & Auth -->
   <script src="https://www.gstatic.com/firebasejs/10.11.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.11.0/firebase-auth-compat.js"></script>
@@ -5733,10 +5838,6 @@
       <!-- Quick Nav Buttons -->
       <div class="topbar-quick-nav">
 
-        <button class="quick-nav-btn" onclick="openScheduleModal()" title="Weekly Airing Schedule">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-          <span>Schedule</span>
-        </button>
 
         <button class="quick-nav-btn" onclick="openWatchTogetherModal()" title="Watch anime synchronously with friends">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -8862,14 +8963,9 @@ let heroSwapTimer = null;
             resolution: s.resolution,
           });
         }
-        if (data.embedUrl) {
-          currentStreams.push({
-            server: 'MovieBox Player (Embed)',
-            embedUrl: data.embedUrl,
-            type: 'embed',
-            resolution: 0,
-          });
-        }
+        // The MovieBox web player is deliberately not offered: it answers with
+        // the old "log in before payment" modal, which looks like a broken
+        // player. Only the direct files above are listed.
         if (!currentStreams.length) {
           loaderText.textContent = 'No stream available for this episode.';
           return;
@@ -8948,7 +9044,9 @@ let heroSwapTimer = null;
           data: [],
           index: 0,
           timer: null,
-          autoplay: true,
+          // Rows stay where the viewer put them: the owner asked for no
+          // auto-scrolling carousels anywhere on the page.
+          autoplay: false,
         });
       }
       return categoryCarousels.get(id);
@@ -9599,6 +9697,10 @@ let heroSwapTimer = null;
           const isEmbed = looksEmbed || (!rawUrl && Boolean(s.embedUrl));
           const directUrl = isEmbed ? '' : rawUrl;
           const embedUrl = isEmbed ? (s.embedUrl || rawUrl) : '';
+          // Hosts that only answer with the paywall/login modal are not
+          // players: dropping them here keeps the server list honest.
+          const gated = /moviebox\.ph|aoneroom\.com|hakunaymatata\.com|\/spa\//i.test(embedUrl || directUrl || '');
+          if (gated) return null;
           return {
             server: s.label || s.server || (s.quality ? `${s.quality}` : (isEmbed ? 'Stream Player' : 'Auto')),
             url: directUrl,
@@ -9611,7 +9713,7 @@ let heroSwapTimer = null;
         currentStreams = [
           ...streams.map((s) => toStreamEntry(s, false)),
           ...((json.fallbacks || []).map((s) => toStreamEntry(s, true)))
-        ];
+        ].filter(Boolean);
         updateServerDropdown(currentStreams);
         if (currentStreams.length) {
           // Lead with a direct file when one exists: embed players (whose
@@ -9742,7 +9844,18 @@ let heroSwapTimer = null;
     }
 
     const stripTag = (c) => String(c.title || '').replace(/\s*\[hindi\]\s*/i, '').trim();
-    async function hianimeHasTitle(strippedTitle) {
+    // "Blue Box (Season 1 & 2)" must match HiAnime's "Blue Box": the catalog
+    // check compares the normalized title and its season/year-free forms.
+    function animeTitleKeys(raw) {
+      const base = _normTitle(raw);
+      const keys = new Set();
+      if (base) keys.add(base);
+      const noSeason = base.replace(/\b(season|part|cour|chapter|movie|ova|ona|special)s?\b.*$/, '').trim();
+      if (noSeason.length >= 4) keys.add(noSeason);
+      const noYear = base.replace(/\b(19|20)\d{2}\b.*$/, '').trim();
+      if (noYear.length >= 4) keys.add(noYear);
+      return [...keys];
+    }    async function hianimeHasTitle(strippedTitle) {
       const key = _normTitle(strippedTitle);
       if (!key) return false;
       if (_hianimeMatchCache.has(key)) return _hianimeMatchCache.get(key);
@@ -9786,7 +9899,7 @@ let hindiAnimeCarouselStarted = false;
         const rest = await Promise.all(
           Array.from({ length: Math.max(0, (first.totalPages || 1) - 1) }, (_, i) => loadPage(i + 2))
         );
-        const items = [first, ...rest]
+        let items = [first, ...rest]
           .flatMap((d) => (d && d.success ? d.items || [] : []))
           .filter((i) => i && i.id);
         if (!items.length) {
@@ -9819,7 +9932,39 @@ let hindiAnimeCarouselStarted = false;
           if (fallback.length) items.push(...fallback);
         }
         if (!items.length) throw new Error('empty catalogue');
-        initCategoryCarousel('hindi-anime-list', items);
+        // The library mixes live-action in with anime, so this row (titled
+        // "Hindi Anime") keeps only titles HiAnime itself carries and says
+        // [Hindi] in their name. One catalog call covers every item — a search
+        // per item was both slow and strict about season suffixes. If the
+        // catalog comes back thin the row keeps its full list instead of
+        // rendering almost empty.
+        try {
+          const catalog = await fetch('/api/hianime/catalog?page=1&limit=1000', { cache: 'no-store' })
+            .then((r) => r.json())
+            .catch(() => null);
+          // HiAnime's synced items carry the name as { english, romaji }, so
+          // every spelling of it has to be indexed, not just one field.
+          const known = new Map();
+          for (const a of ((catalog && catalog.animes) || [])) {
+            const t = a && a.title;
+            const display = (t && (t.english || t.romaji)) || (a && (a.name || a.jname)) || (typeof t === "string" ? t : "");
+            if (!display) continue;
+            for (const name of [t && t.english, t && t.romaji, a && a.name, a && a.jname, typeof t === "string" ? t : null]) {
+              const key = _normTitle(name);
+              if (key && !known.has(key)) known.set(key, display);
+            }
+          }
+          if (known.size >= 20) {
+            const matched = [];
+            for (const it of items) {
+              const key = animeTitleKeys(stripTag(it)).find((k) => known.has(k));
+              // The row shows HiAnime's own name for the title (the Hindi
+              // library's raw name carries release junk) plus the language tag.
+              if (key) matched.push({ ...it, title: known.get(key) + " [Hindi]" });
+            }
+            if (matched.length >= 5) items = matched;
+          }
+        } catch (e) {}        initCategoryCarousel('hindi-anime-list', items);
         updateCarouselHeading('hindi-anime-list', 'Hindi Anime');
       } catch (e) {
         const track = document.getElementById('hindiAnimeListCarouselTrack');
@@ -12062,8 +12207,9 @@ let hindiAnimeCarouselStarted = false;
           });
         }, { once: true });
       } else {
-        const fallback = currentStreams.find(s => s.embedUrl);
-        playEmbedFallback(fallback ? fallback.embedUrl : `https://megaplay.buzz/stream/s-2/${selectedAnime?.id}/${currentAudio}?ep=${currentEpisode}`);
+        // No embed left to fall back to (the gated MovieBox player is gone),
+        // so say so instead of opening a player that cannot play.
+        showToastNotification('No playable link found for this episode.');
       }
     }
 
