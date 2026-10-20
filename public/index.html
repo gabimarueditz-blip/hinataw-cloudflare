@@ -7240,7 +7240,9 @@
         const urls = [s.embedUrl, s.url, s.stream].filter(Boolean).join(' ');
         return !(urls && gatedHost.test(urls));
       });
-      const pool = clean.length ? clean : list;
+      // A list made *only* of gated players stays empty on purpose: showing one
+      // again just to avoid an empty menu is what put the login modal back.
+      const pool = clean;
       const playable = pool.filter(s => s && (s.embedUrl || s.url));
       return playable.length > 0 ? playable : pool;
     }
