@@ -66,29 +66,20 @@
           rememberOwnerAd(key);
           return true;
         }
-        // Popups blocked while the viewer's gesture is still live (the click
-        // that brought us here): the tag gets its run in a sandboxed frame,
-        // which refuses top navigation so a popunder can never replace the page
-        // the viewer is on. Without a live gesture — openPlayer is often reached
-        // after an await, where a window cannot open at all — the attempt is
-        // skipped and the key stays unrecorded, so the next real click can still
-        // fire a popup instead of being silently burnt here.
+        // Popups are blocked for this viewer. Nothing is fired from this tab:
+        // the network answers its first click by taking the page away, and in
+        // the tab someone is watching an episode that would end the session and
+        // leave Back stuck in the advertiser's redirect chain. The viewer is
+        // told why no sponsor appeared instead, and the key is *not* recorded,
+        // so the ad fires normally once pop-ups are allowed.
         const activation = navigator.userActivation;
         if (activation && !activation.isActive) return false;
-        const frame = document.createElement('iframe');
-        frame.setAttribute('title', 'sponsor');
-        frame.setAttribute('aria-hidden', 'true');
-        frame.setAttribute('tabindex', '-1');
-        frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox');
-        frame.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;';
-        const openTag = '<scr' + 'ipt>';
-        const closeTag = '</scr' + 'ipt>';
-        const safe = code.split('</script').join('<\\/script');
-        frame.srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>' + openTag + safe + closeTag + '</body></html>';
-        document.body.appendChild(frame);
-        window.setTimeout(() => { try { frame.remove(); } catch (e) {} }, 30000);
-        rememberOwnerAd(key);
-        return true;
+        try {
+          if (typeof showToastNotification === 'function') {
+            showToastNotification('Allow pop-ups for this site — that is what keeps it free.');
+          }
+        } catch (e) {}
+        return false;
       } catch (e) { return false; }
     }
     window.fireOwnerAd = fireOwnerAd;
@@ -5936,7 +5927,7 @@
       <!-- MovieBox + Hindi hits: their own grids so the card shapes and click
            routing stay right (these open by slug, not by HiAnime id). -->
       <div id="searchMovieboxBlock" style="display: none; margin-top: 26px;">
-        <h3 class="hianime-heading" id="searchMovieboxHeading">MovieBox</h3>
+        <h3 class="hianime-heading" id="searchMovieboxHeading">More titles</h3>
         <div class="anime-grid" id="searchMovieboxGrid"></div>
       </div>
       <div id="searchHindiBlock" style="display: none; margin-top: 26px;">
@@ -7239,8 +7230,19 @@
     // list rather than leaving the player with zero servers.
     function playableStreams(streams) {
       const list = Array.isArray(streams) ? streams : [];
-      const playable = list.filter(s => s && (s.embedUrl || s.url));
-      return playable.length > 0 ? playable : list;
+      // Players that only answer with the paywall/login modal are not players:
+      // listing them put a "please log in before payment" screen in the server
+      // menu, which reads as a broken site. They are dropped on every path
+      // (provider, HiAnime feed, India feed) before the dropdown is built.
+      const gatedHost = /moviebox|netfilm|aoneroom|hakunaymatata|\/spa\//i;
+      const clean = list.filter(s => {
+        if (!s) return false;
+        const urls = [s.embedUrl, s.url, s.stream].filter(Boolean).join(' ');
+        return !(urls && gatedHost.test(urls));
+      });
+      const pool = clean.length ? clean : list;
+      const playable = pool.filter(s => s && (s.embedUrl || s.url));
+      return playable.length > 0 ? playable : pool;
     }
     let hlsInstance = null;
     let searchTimeout = null;
@@ -9714,7 +9716,7 @@ let heroSwapTimer = null;
           const embedUrl = isEmbed ? (s.embedUrl || rawUrl) : '';
           // Hosts that only answer with the paywall/login modal are not
           // players: dropping them here keeps the server list honest.
-          const gated = /moviebox\.ph|aoneroom\.com|hakunaymatata\.com|\/spa\//i.test(embedUrl || directUrl || '');
+          const gated = /moviebox|netfilm|aoneroom|hakunaymatata|\/spa\//i.test(embedUrl || directUrl || '');
           if (gated) return null;
           return {
             server: s.label || s.server || (s.quality ? `${s.quality}` : (isEmbed ? 'Stream Player' : 'Auto')),
@@ -10377,7 +10379,7 @@ let hindiAnimeCarouselStarted = false;
         }
 
         renderGrid('searchGrid', hiResults);
-        renderMovieboxResultsGrid(mbResults, 'MovieBox');
+        renderMovieboxResultsGrid(mbResults, 'More titles');
         renderIndiaResultsGrid(indiaResults, 'Hindi catalogue');
         window.scrollTo({ top: 0, behavior: 'smooth' });
       } catch (err) {
@@ -10446,7 +10448,7 @@ let hindiAnimeCarouselStarted = false;
         grid.innerHTML = '';
         return;
       }
-      if (heading) heading.textContent = `${label || 'MovieBox'} (${list.length})`;
+      if (heading) heading.textContent = `${label || 'More titles'} (${list.length})`;
       grid.innerHTML = list.map((item) => {
         const title = item.title || 'Untitled';
         const cover = item.image || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';

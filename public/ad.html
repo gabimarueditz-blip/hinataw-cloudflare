@@ -17,36 +17,49 @@
     .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: -0.2px; }
     .brand span:first-child { color: #fff; }
     .brand span:last-child { color: #ff6ea8; }
-    .back {
-      display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px;
-      background: #ffbade; color: #0b0c16; text-decoration: none; font-weight: 800; font-size: 13.5px;
-    }
-    .back:hover { background: #ffd0e8; }
-    main { max-width: 720px; margin: 0 auto; padding: 28px 20px 56px; }
-    .note { color: #a9a9bd; font-size: 13.5px; margin: 0 0 18px; }
-    /* The tag injects its own creatives; this box keeps a stable slot for it. */
+    .tag { font-size: 11px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: #0b0c16; background: #ffbade; padding: 5px 10px; border-radius: 999px; }
+    main { max-width: 560px; margin: 0 auto; padding: 34px 20px 56px; text-align: center; }
+    h1 { font-size: 21px; margin: 0 0 10px; letter-spacing: -0.3px; }
+    .note { color: #a9a9bd; font-size: 13.5px; margin: 0 0 22px; }
+    /* The tag injects its own creative here when the zone serves one. The box is
+       kept so an in-page creative has a stable slot instead of stacking over the
+       call to action. */
     #ad-slot {
-      min-height: 260px; display: flex; align-items: center; justify-content: center;
+      min-height: 250px; display: flex; align-items: center; justify-content: center;
       border: 1px dashed rgba(255,255,255,0.12); border-radius: 14px; padding: 12px;
-      background: rgba(255,255,255,0.02); overflow: hidden;
+      background: rgba(255,255,255,0.02); overflow: hidden; margin-bottom: 22px;
     }
     #ad-slot iframe, #ad-slot img, #ad-slot video { max-width: 100%; }
-    .fine { color: #6f7086; font-size: 12px; margin-top: 18px; }
+    #continue {
+      position: relative; z-index: 2; display: inline-flex; align-items: center; gap: 10px;
+      padding: 15px 30px; border: 0; border-radius: 999px; cursor: pointer;
+      font: 800 16px/1 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #ff6ea8; color: #0b0c16; box-shadow: 0 10px 26px rgba(255,110,168,0.28);
+      transition: transform .12s ease, background .12s ease;
+    }
+    #continue:hover { background: #ffbade; transform: translateY(-1px); }
+    #continue:disabled { background: #3a3b52; color: #8d8ea6; box-shadow: none; cursor: progress; transform: none; }
+    .fine { color: #6f7086; font-size: 12px; margin-top: 16px; }
+    .skip { color: #a9a9bd; font-size: 13px; margin-top: 14px; }
+    .skip a { color: #ffbade; text-decoration: none; font-weight: 700; }
   </style>
 </head>
 <body>
   <div class="bar">
     <div class="brand"><span>Hinataw</span><span>.exe</span></div>
-    <a class="back" href="/" target="_blank" rel="noopener">Open Hinataw.exe</a>
+    <div class="tag">Sponsored</div>
   </div>
 
   <main>
+    <h1>Your episode is ready</h1>
     <p class="note">
-      This tab is sponsored — it is what keeps Hinataw.exe free. Your episode keeps
-      playing in the tab you came from, and this tab never touches it.
+      It is playing in the tab you came from — this tab only shows the sponsor that
+      keeps Hinataw.exe free. Nothing here can pause or reload your episode.
     </p>
     <div id="ad-slot"></div>
-    <p class="fine">Ads are served by our ad partner. You can close this tab at any time.</p>
+    <button id="continue" type="button" disabled>Continue in <span id="secs">3</span>…</button>
+    <p class="skip"><a id="skip" href="/" target="_blank" rel="noopener">Back to the site</a></p>
+    <p class="fine">One sponsor page per episode. You can close this tab at any time.</p>
   </main>
 
   <script>
@@ -54,13 +67,76 @@
     // ad code can navigate, reload or replace the page the viewer is watching.
     try { window.opener = null; } catch (e) {}
   </script>
-  <!-- Owner tag (zone 12065764), loaded here in a real top-level tab so it can
-       actually serve. The parked copy in public/index.html stays inert. -->
+  <!-- Owner tag (zone 12065764). The zone is an Onclick format: the network
+       shows the advertiser on the first real click inside the page, so it has to
+       live in a top-level tab and the viewer has to click there. The parked copy
+       in the site itself stays inert. -->
   <script>
     (function (s) {
       s.dataset.zone = '12065764';
       s.src = 'https://al5sm.com/tag.min.js';
     })([document.documentElement, document.body].filter(Boolean).pop().appendChild(document.createElement('script')));
+
+    (function () {
+      var btn = document.getElementById('continue');
+      var secs = document.getElementById('secs');
+      var skip = document.getElementById('skip');
+      var params = new URLSearchParams(location.search);
+      var key = params.get('k') || '';
+
+      // The episode is only marked as sponsored here, and only once the viewer
+      // has actually clicked: a tab that is opened and closed, or a same-tab
+      // visit that is abandoned, leaves that episode's ad able to fire again.
+      function remember() {
+        if (!key) return;
+        try {
+          var store = 'hinataw_owner_ad_keys_v2';
+          var ttl = 30 * 24 * 60 * 60 * 1000;
+          var now = Date.now();
+          var rows = JSON.parse(localStorage.getItem(store) || '[]');
+          var map = new Map((Array.isArray(rows) ? rows : []).filter(
+            function (r) { return Array.isArray(r) && r[0] && now - (Number(r[1]) || 0) < ttl; }
+          ));
+          map.set(key, now);
+          localStorage.setItem(store, JSON.stringify(Array.from(map).slice(-300)));
+        } catch (e) {}
+      }
+      // The tag is fetched asynchronously: a short countdown means it has
+      // finished attaching its click handler before the button is usable, so
+      // the click is not swallowed by a page that is not ready yet.
+      var left = 3;
+      var timer = setInterval(function () {
+        left -= 1;
+        if (left > 0) { secs.textContent = String(left); return; }
+        clearInterval(timer);
+        btn.disabled = false;
+        btn.innerHTML = 'Continue \u25B6';
+      }, 800);
+
+      // The network answers the first click in this tab by loading the sponsor.
+      // If it does not (tag blocked, no creative for this visitor), the click
+      // must never strand the viewer on a dead page: hand them back to where
+      // they came from. On a same-tab visit that is one step back in history, so
+      // the player page they left is exactly what they get.
+      function fallback() {
+        if (document.visibilityState !== 'visible') return;
+        // Opened by the player, so this tab is ours to close: the viewer lands
+        // back on the episode instead of a dead sponsored page.
+        try { window.close(); } catch (e) {}
+        setTimeout(function () { if (!document.hidden) location.replace('/'); }, 400);
+      }
+      btn.addEventListener('click', function () {
+        remember();
+        setTimeout(fallback, 900);
+      });
+      // Any click in the page is enough for the network; the same fallback keeps
+      // an accidental click from leaving this tab blank.
+      document.addEventListener('click', function (ev) {
+        remember();
+        if (ev.target === skip) return;
+        setTimeout(fallback, 1100);
+      }, false);
+    })();
   </script>
 </body>
 </html>
