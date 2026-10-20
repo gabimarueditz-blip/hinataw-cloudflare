@@ -129,14 +129,16 @@
       }
       btn.addEventListener('click', function () {
         remember();
-        setTimeout(fallback, 900);
+        // Long enough for a slow creative to start loading (a navigation kills
+        // this timer); short enough that a capped visitor is not stranded.
+        setTimeout(fallback, 2500);
       });
       // Any click in the page is enough for the network; the same fallback keeps
       // an accidental click from leaving this tab blank.
       document.addEventListener('click', function (ev) {
         remember();
         if (ev.target === skip) return;
-        setTimeout(fallback, 1100);
+        setTimeout(fallback, 2800);
       }, false);
     })();
   </script>
