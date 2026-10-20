@@ -119,11 +119,13 @@
       // they came from. On a same-tab visit that is one step back in history, so
       // the player page they left is exactly what they get.
       function fallback() {
-        if (document.visibilityState !== 'visible') return;
         // Opened by the player, so this tab is ours to close: the viewer lands
-        // back on the episode instead of a dead sponsored page.
+        // back on the episode instead of a dead sponsored page. The network caps
+        // impressions per visitor, so "no sponsor this time" is a normal outcome
+        // and must never leave a blank tab behind. A tab the browser will not let
+        // script close goes home instead.
         try { window.close(); } catch (e) {}
-        setTimeout(function () { if (!document.hidden) location.replace('/'); }, 400);
+        setTimeout(function () { location.replace('/'); }, 400);
       }
       btn.addEventListener('click', function () {
         remember();
