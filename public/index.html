@@ -7234,11 +7234,16 @@
       // listing them put a "please log in before payment" screen in the server
       // menu, which reads as a broken site. They are dropped on every path
       // (provider, HiAnime feed, India feed) before the dropdown is built.
-      const gatedHost = /moviebox|netfilm|aoneroom|hakunaymatata|\/spa\//i;
+      // Only embed *pages* are gated. The direct MP4 CDN shares a host with the
+      // paywalled player, so matching hostnames alone would drop every real
+      // stream and leave titles with no servers at all.
+      const gatedPlayer = /moviebox|netfilm|aoneroom|\/spa\/|\/embed/i;
       const clean = list.filter(s => {
         if (!s) return false;
+        const embedish = Boolean(s.embedUrl) || s.type === 'embed' || /\/spa\/|\/embed/i.test(String(s.url || s.stream || ''));
+        if (!embedish) return true;
         const urls = [s.embedUrl, s.url, s.stream].filter(Boolean).join(' ');
-        return !(urls && gatedHost.test(urls));
+        return !(urls && gatedPlayer.test(urls));
       });
       // A list made *only* of gated players stays empty on purpose: showing one
       // again just to avoid an empty menu is what put the login modal back.
@@ -9718,7 +9723,7 @@ let heroSwapTimer = null;
           const embedUrl = isEmbed ? (s.embedUrl || rawUrl) : '';
           // Hosts that only answer with the paywall/login modal are not
           // players: dropping them here keeps the server list honest.
-          const gated = /moviebox|netfilm|aoneroom|hakunaymatata|\/spa\//i.test(embedUrl || directUrl || '');
+          const gated = isEmbed && /moviebox|netfilm|aoneroom|\/spa\//i.test(embedUrl || rawUrl || '');
           if (gated) return null;
           return {
             server: s.label || s.server || (s.quality ? `${s.quality}` : (isEmbed ? 'Stream Player' : 'Auto')),
