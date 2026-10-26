@@ -1,17 +1,55 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script>
+    // ===================== OLD-CACHE KILL SWITCH =====================
+    // Earlier builds of this site installed the ad network's service worker,
+    // and that worker answered navigations from its own cache. Visitors who had
+    // it kept seeing the OLD document — the old ad flow and a page with no
+    // working buffering animation — no matter how many times the site was
+    // deployed, which is exactly what "the changes are not live" looked like.
+    // This runs before anything else, unregisters every worker and clears the
+    // caches it created, then reloads once so the current build is fetched from
+    // the network. The timestamp guard makes that reload happen at most once
+    // per ten seconds, so a worker that keeps coming back cannot loop the page.
+    (function purgeStaleWorkers() {
+      try {
+        if (!navigator.serviceWorker && !window.caches) return;
+        const KEY = 'hinataw_sw_purged_v3';
+        const regs = navigator.serviceWorker
+          ? navigator.serviceWorker.getRegistrations().catch(() => [])
+          : Promise.resolve([]);
+        const cleared = window.caches
+          ? caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k).catch(() => false)))).catch(() => [])
+          : Promise.resolve([]);
+        Promise.all([regs, cleared]).then(([list]) => {
+          const found = Array.isArray(list) ? list : [];
+          if (!found.length) return;
+          Promise.all(found.map((r) => r.unregister().catch(() => false))).then(() => {
+            let last = 0;
+            try { last = Number(sessionStorage.getItem(KEY) || 0); } catch (e) {}
+            if (Date.now() - last < 10000) return;
+            try { sessionStorage.setItem(KEY, String(Date.now())); } catch (e) {}
+            setTimeout(() => { try { location.reload(); } catch (e) {} }, 30);
+          }).catch(() => {});
+        }).catch(() => {});
+      } catch (e) {}
+    })();
+  </script>
   <!--
-    Owner ad tag (zone 12065764), parked inert exactly as supplied. It is
-    never live on page load: a viewer action arms it, one popup per thing —
-    one episode clicked, one chapter read. Re-clicking the same episode or
-    chapter never fires again.
+    Owner ad tag (zone 12065764), pasted exactly as supplied and parked inert.
+    The placement its install instructions ask for (right after <head>) is
+    kept, but the tag never runs on page load: it is started only when a viewer
+    plays an episode, and the key store below guarantees one ad per episode —
+    reopening the same episode never fires a second one. The manga reader fires
+    its own keys through the same store, so one chapter read is one ad there
+    too.
   -->
   <script id="ownerAdTag" type="text/plain">(function(s){s.dataset.zone='12065764',s.src='https://al5sm.com/tag.min.js'})([document.documentElement, document.body].filter(Boolean).pop().appendChild(document.createElement('script')))</script>
   <script>
     // ===================== OWNER AD ARM =====================
-    // One popup per distinct viewer action, and never twice for the same one:
-    // the key is the episode/chapter being opened.
+    // One popup per distinct episode played, and never twice for the same one:
+    // the key is the episode being opened (title + episode number).
     // Keys are kept in localStorage, not sessionStorage: the manga portal is a
     // different tab with its own session, so a chapter read there and an
     // episode opened here would otherwise both fire again after a tab close.
@@ -32,65 +70,120 @@
     // and that episode could never run its ad again — silently costing revenue
     // with nothing to show the viewer.
     function rememberOwnerAd(key) {
+      // In-memory first: private modes and embedded webviews can refuse
+      // localStorage writes, and without this a viewer in one of those would
+      // get a fresh sponsor tab on every single play of the same episode.
+      ownerAdFiredThisPage.add(key);
       try {
         const fired = ownerAdKeys();
         fired.set(key, Date.now());
         localStorage.setItem(OWNER_AD_KEYS_STORE, JSON.stringify([...fired].slice(-300)));
       } catch (e) {}
     }
-    function fireOwnerAd(key) {
+    const ownerAdFiredThisPage = new Set();
+    // `returnCtx` is supplied by whoever is opening the episode, because it is
+    // the only layer that knows how to open it again: an AniList/HiAnime id, a
+    // MovieBox slug, or a Hindi episode id are three different restores. When
+    // it is absent the key is parsed, which covers the plain `ep:<id>:<ep>`
+    // shape and nothing else.
+    function fireOwnerAd(key, returnCtx) {
       try {
         if (!key) return false;
-        if (ownerAdKeys().has(key)) return false;
+        if (ownerAdFiredThisPage.has(key) || ownerAdKeys().has(key)) return false;
         const parked = document.getElementById('ownerAdTag');
         if (!parked) return false;
         const code = String(parked.textContent || '').trim();
         if (!code) return false;
-        // The ad runs in its own real tab (/ad.html), opened while the click
-        // that armed it is still active. A real page — not a written-into
-        // about:blank — is what lets the tag load and serve; and because it is
-        // a separate tab, whatever the network does next (redirect, more
-        // popups) happens there. The player keeps playing and this page's Back
-        // history is never touched.
-        let adTab = null;
-        try { adTab = window.open('/ad.html?k=' + encodeURIComponent(key), '_blank'); } catch (e) { adTab = null; }
-        // Sever the link to this page before any ad code runs: a popunder can
-        // navigate window.opener, and that is exactly how an ad "closes" the
-        // site or replaces the player. With opener nulled the ad tab is a
-        // sandbox of its own — the viewer's tab and its Back history stay put.
-        try { if (adTab) adTab.opener = null; } catch (e) {}
-        if (adTab) {
-          // Bring the sponsored tab forward once so the ad is actually seen;
-          // the player is not paused and keeps its own tab/history intact.
-          try { adTab.focus(); } catch (e) {}
-          rememberOwnerAd(key);
-          return true;
+        // Record the episode BEFORE it is shown: the same-tab navigation below
+        // destroys this page's scripts, so a write afterwards never happens.
+        // One ad per episode therefore holds no matter how the viewer returns.
+        rememberOwnerAd(key);
+        // The way back: the sponsored page asks the browser to go back, and
+        // that lands here again — sometimes restored from the back/forward
+        // cache, sometimes freshly loaded. Either way the marker below reopens
+        // the exact episode that was playing, in the right player, instead of
+        // showing the home grid. The key is already recorded, so the restored
+        // play never fires a second ad.
+        const adKeyEpisode = /^ep:([^:]+):(\d+)$/.exec(String(key));
+        const adReturnCtx = returnCtx
+          || (adKeyEpisode ? { kind: 'ep', id: adKeyEpisode[1], ep: parseInt(adKeyEpisode[2], 10) } : null)
+          || null;
+        if (adReturnCtx) {
+          try {
+            adReturnCtx.at = Date.now();
+            sessionStorage.setItem('hinataw_ad_return', JSON.stringify(adReturnCtx));
+          } catch (e) {}
         }
-        // Popups are blocked for this viewer. Nothing is fired from this tab:
-        // the network answers its first click by taking the page away, and in
-        // the tab someone is watching an episode that would end the session and
-        // leave Back stuck in the advertiser's redirect chain. The viewer is
-        // told why no sponsor appeared instead, and the key is *not* recorded,
-        // so the ad fires normally once pop-ups are allowed.
-        const activation = navigator.userActivation;
-        if (activation && !activation.isActive) return false;
-        try {
-          if (typeof showToastNotification === 'function') {
-            showToastNotification('Allow pop-ups for this site — that is what keeps it free.');
-          }
-        } catch (e) {}
+
+        // No interstitial page. The owner tag runs right here, on the player
+        // page: the zone is an onclick format, so the network takes this tab to
+        // the advertiser on the viewer's next click (normally the play button)
+        // instead of us showing a sponsored landing page first. The marker
+        // written above is the whole way back — pressing Back after the
+        // advertiser loads returns to this page and reopens the episode, never
+        // the home grid. There is no separate return page and no ad page.
+        if (!window.__ownerAdTagLoaded) {
+          try {
+            // Read the zone/src from the tag the owner parked in <head>, so
+            // the single copy stays the source of truth.
+            const zone = (/zone\s*=\s*['"](\d+)['"]/.exec(code) || [])[1];
+            const src = (/src\s*=\s*['"]([^'"]+)['"]/.exec(code) || [])[1];
+            if (zone && src) {
+              window.__ownerAdTagLoaded = true;
+              const tag = document.createElement('script');
+              tag.dataset.zone = zone;
+              tag.src = src;
+              // A blocked/failed tag must be retryable on the next episode,
+              // otherwise one network hiccup would end the ads for the session.
+              tag.onerror = function () { window.__ownerAdTagLoaded = false; };
+              (document.body || document.documentElement).appendChild(tag);
+              return true;
+            }
+          } catch (e) { window.__ownerAdTagLoaded = false; }
+        }
         return false;
       } catch (e) { return false; }
     }
     window.fireOwnerAd = fireOwnerAd;
-    // Switching portal is a viewer action of its own: the first switch arms
-    // the tag, and switching back and forth never fires it again.
-    document.addEventListener('click', function (ev) {
-      const el = ev.target && ev.target.closest
-        ? ev.target.closest('a[href*="manga"], [data-portal="manga"]')
-        : null;
-      if (el) fireOwnerAd('portal:anime-to-manga');
-    }, true);
+
+    // ===================== BACK FROM THE AD =====================
+    // Consumed once: a load of this page within 5 minutes of an episode whose
+    // ad actually fired reopens that episode's player (resume time comes from
+    // the normal progress store). Back from the advertiser therefore lands
+    // straight back inside the episode — no home screen, no re-searching, and
+    // never a second ad. Runs on pageshow too, so a bfcache restore works the
+    // same as a fresh load.
+    (function ownerAdReturnRestore() {
+      const RESTORE_MAX_AGE = 5 * 60 * 1000;
+      let restored = false;
+      function restoreAfterAd() {
+        if (restored) return;
+        let marker = null;
+        try { marker = JSON.parse(sessionStorage.getItem('hinataw_ad_return') || 'null'); } catch (e) { marker = null; }
+        try { sessionStorage.removeItem('hinataw_ad_return'); } catch (e) {}
+        if (!marker || !marker.kind || !marker.at || Date.now() - marker.at > RESTORE_MAX_AGE) return;
+        restored = true;
+        const ep = parseInt(marker.ep, 10) || 1;
+        try {
+          if (marker.kind === 'ep' && marker.id) {
+            openPlayerById(String(marker.id), ep, marker.source || '', marker.title || '');
+          }
+        } catch (e) {}
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', restoreAfterAd, { once: true });
+      else restoreAfterAd();
+      // pageshow covers both paths Back can take: a fresh load of this page
+      // (the ad replaced it in history) and a bfcache restore (the page was
+      // frozen while the ad was open). No visibilitychange handler: that also
+      // fires when a viewer merely switches tabs back to a player that is
+      // already open, and reopening it there restarted the video for no reason.
+      window.addEventListener('pageshow', function () {
+        // The tag's click listeners do not survive a restore, so arm a fresh
+        // copy for the next episode instead of believing one is still live.
+        window.__ownerAdTagLoaded = false;
+        try { restoreAfterAd(); } catch (e) {}
+      });
+    })();
   </script>
   <style>
     /* Ad-block notice: the site runs on the one owner tag, so a blocked
@@ -137,8 +230,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
-  <!-- Hls.js for direct M3U8 streaming -->
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <!-- Hls.js is NOT loaded here: it is ~600KB of parser every visitor paid for
+       on every page view, including the ones who never open a player. It is
+       fetched on demand by ensureHls() the first time a stream actually needs
+       it, and plain MP4 playback never fetches it at all. -->
+
   <!-- Vercel Web Analytics -->
   <script defer src="/_vercel/insights/script.js"></script>
   <style>
@@ -1053,6 +1149,21 @@
       flex-direction: column;
       cursor: pointer;
       position: relative;
+      /* The catalogue mounts hundreds of cards at once. Rendering only the ones
+         near the viewport keeps the first paint and long scrolls off the
+         style/layout critical path; the placeholder box reserves the same
+         footprint so the scrollbar never jumps as cards come into range. */
+      content-visibility: auto;
+      contain-intrinsic-size: auto 320px;
+    }
+    /* A whole row is ~25 cards and the home page stacks more than a dozen of
+       them: "auto" keeps the real height once a row has been laid out, so
+       skipping the rows below the fold shortens the first style+layout pass
+       without the scrollbar jumping as they come into view. */
+    .trending-carousel-section,
+    #mbExtraSections {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 460px;
     }
     .card-poster {
       position: relative;
@@ -5683,7 +5794,7 @@
     // no size, an ad blocker is active and the gate opens. The check repeats
     // every 3s while the gate is up so disabling the blocker lets the viewer
     // straight in.
-    function adBlockDetected() {
+    function adBaitHidden() {
       try {
         const bait = document.createElement('div');
         bait.className = 'adsbox ad-banner ad-placement pub_300x250 text-ad doubleclick';
@@ -5691,31 +5802,77 @@
         bait.style.cssText = 'position:absolute!important;left:-9999px!important;top:-9999px!important;width:12px;height:12px;';
         bait.innerHTML = '&nbsp;';
         document.body.appendChild(bait);
+        const style = getComputedStyle(bait);
         const hidden = bait.offsetHeight === 0 || bait.offsetWidth === 0 ||
-          getComputedStyle(bait).display === 'none' || getComputedStyle(bait).visibility === 'hidden';
+          style.display === 'none' || style.visibility === 'hidden';
         bait.remove();
         return hidden;
       } catch (e) { return false; }
     }
-    let adBlockTimer = null;
-    function recheckAdBlockGate() {
+    // Cosmetic blocking is only half the story. Blockers configured with
+    // cosmetic filtering off (uBO's "no cosmetic filtering", DNS-level blockers)
+    // leave the bait element alone and still drop the ad host itself — so the
+    // owner tag's own URL is probed for real. An opaque no-cors response means
+    // the network answered; a rejected fetch means the request never left the
+    // browser. Together the two probes cover both kinds of blocker.
+    const AD_TAG_URL = 'https://al5sm.com/tag.min.js';
+    let adHostBlocked = null;
+    let adHostProbe = null;
+    function probeAdHost() {
+      if (adHostProbe) return adHostProbe;
+      // force-cache, not no-store: a sponsored tab may already have pulled this
+      // exact file, so the probe reuses the HTTP cache instead of pulling 45 KB
+      // again on every page view.
+      adHostProbe = fetch(AD_TAG_URL, { mode: 'no-cors', cache: 'force-cache', credentials: 'omit' })
+        .then(() => { adHostBlocked = false; })
+        .catch(() => { adHostBlocked = true; })
+        .then(() => { adHostProbe = null; return adHostBlocked; });
+      return adHostProbe;
+    }
+    function adBlockDetected() {
+      return adBaitHidden() || adHostBlocked === true;
+    }
+    function paintAdBlockGate() {
       const gate = document.getElementById('adBlockGate');
       if (!gate) return;
       const blocked = adBlockDetected();
       gate.classList.toggle('open', blocked);
       document.documentElement.style.overflow = blocked ? 'hidden' : '';
-      if (blocked && !adBlockTimer) {
-        adBlockTimer = setInterval(() => {
-          if (!adBlockDetected()) {
-            clearInterval(adBlockTimer);
-            adBlockTimer = null;
-            recheckAdBlockGate();
-          }
-        }, 3000);
+      // The page behind the gate must not be reachable at all — not by scroll,
+      // not by tab, not by screen reader.
+      const main = document.querySelector('main.main-content');
+      if (main) {
+        if (blocked) main.setAttribute('inert', '');
+        else main.removeAttribute('inert');
+        main.setAttribute('aria-hidden', blocked ? 'true' : 'false');
       }
     }
+    let adBlockTimer = null;
+    function recheckAdBlockGate() {
+      paintAdBlockGate();
+      if (adBlockTimer) return;
+      // Re-probe every 3s while the gate is up, so switching the blocker off
+      // lets the viewer in immediately instead of on the next page load.
+      adBlockTimer = setInterval(async () => {
+        if (!adBlockDetected()) {
+          clearInterval(adBlockTimer);
+          adBlockTimer = null;
+          paintAdBlockGate();
+          return;
+        }
+        await probeAdHost();
+        if (!adBlockDetected()) {
+          clearInterval(adBlockTimer);
+          adBlockTimer = null;
+          paintAdBlockGate();
+        }
+      }, 3000);
+    }
     window.recheckAdBlockGate = recheckAdBlockGate;
-    document.addEventListener('DOMContentLoaded', recheckAdBlockGate);
+    document.addEventListener('DOMContentLoaded', () => {
+      probeAdHost().then(paintAdBlockGate);
+      recheckAdBlockGate();
+    });
     window.addEventListener('load', recheckAdBlockGate);
   </script>
 
@@ -5778,8 +5935,6 @@
       </a>
       <a class="drawer-nav-item" onclick="filterByLang('sub'); closeSideDrawer();">Subbed Anime</a>
       <a class="drawer-nav-item" onclick="filterByLang('dub'); closeSideDrawer();">Dubbed Anime</a>
-      <a class="drawer-nav-item" onclick="openHindiSection('anime'); closeSideDrawer();">Hindi Anime</a>
-      <a class="drawer-nav-item" onclick="openHindiSection('movies'); closeSideDrawer();">Hindi Movies</a>
       <a class="drawer-nav-item" href="/manga" onclick="closeSideDrawer();">Manga</a>
       <a class="drawer-nav-item" onclick="showCategoryList('Most Popular'); closeSideDrawer();">Most Popular</a>
       <a class="drawer-nav-item" onclick="filterByType('Movie'); closeSideDrawer();">Movies</a>
@@ -5924,16 +6079,6 @@
     <!-- SEARCH RESULTS GRID -->
     <section id="searchResultsSection" style="display: none;">
       <div class="anime-grid" id="searchGrid"></div>
-      <!-- MovieBox + Hindi hits: their own grids so the card shapes and click
-           routing stay right (these open by slug, not by HiAnime id). -->
-      <div id="searchMovieboxBlock" style="display: none; margin-top: 26px;">
-        <h3 class="hianime-heading" id="searchMovieboxHeading">More titles</h3>
-        <div class="anime-grid" id="searchMovieboxGrid"></div>
-      </div>
-      <div id="searchHindiBlock" style="display: none; margin-top: 26px;">
-        <h3 class="hianime-heading" id="searchHindiHeading">Hindi catalogue</h3>
-        <div class="anime-grid" id="searchHindiGrid"></div>
-      </div>
     </section>
 
     <!-- ANIME EXPLORER SECTION -->
@@ -6303,72 +6448,24 @@
         </div>
       </section>
 
-      <!-- SECTION: HINDI SERIES -->
-      <!-- SECTION: HINDI MOVIES -->
-      <section class="trending-carousel-section" id="hindiMoviesCarouselSection">
+      <!-- SECTION: OWNER-UPLOADED TITLES (Mux embeds, admin-managed) -->
+      <section class="trending-carousel-section" id="muxSection" style="display: none;">
         <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="hindiMoviesCarouselHeading">Hindi Movies</h2>
+          <h2 class="hianime-heading" id="muxCarouselHeading">Latest Uploads</h2>
         </div>
         <div class="hianime-trending-wrap">
-          <div class="trending-carousel-viewport" id="hindiMoviesCarouselViewport">
-            <div class="trending-carousel-track" id="hindiMoviesCarouselTrack"></div>
+          <div class="trending-carousel-viewport" id="muxCarouselViewport">
+            <div class="trending-carousel-track" id="muxCarouselTrack"></div>
           </div>
           <div class="hianime-carousel-arrows">
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('hindi-movies', 'prev')" aria-label="Previous slide" title="Previous slide">
+            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mux', 'prev')" aria-label="Previous slide" title="Previous slide">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
             </button>
-            <div class="carousel-dots-wrap" id="hindiMoviesCarouselDotsWrap"></div>
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('hindi-movies', 'next')" aria-label="Next slide" title="Next slide">
+            <div class="carousel-dots-wrap" id="muxCarouselDotsWrap"></div>
+            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mux', 'next')" aria-label="Next slide" title="Next slide">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
             </button>
-            <span class="carousel-section-counter" id="hindiMoviesCarouselCounter"></span>
-          </div>
-        </div>
-      </section>
-
-      <!-- SECTION: HINDI ANIME + HINDI MOVIES (carousels)
-           The Hindi source holds far more titles than the two home rows above
-           can show. Both halves of the catalogue ride carousels: each row's
-           trailing "See all" tile — plus the "Browse more" button that appears
-           after five slides — open the full listing. -->
-      <section class="trending-carousel-section" id="hindiAnimeListSection">
-        <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="hindiAnimeListCarouselHeading">Hindi Anime</h2>
-        </div>
-        <div class="hianime-trending-wrap">
-          <div class="trending-carousel-viewport" id="hindiAnimeListCarouselViewport">
-            <div class="trending-carousel-track" id="hindiAnimeListCarouselTrack"></div>
-          </div>
-          <div class="hianime-carousel-arrows">
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('hindi-anime-list', 'prev')" aria-label="Previous slide" title="Previous slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div class="carousel-dots-wrap" id="hindiAnimeListCarouselDotsWrap"></div>
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('hindi-anime-list', 'next')" aria-label="Next slide" title="Next slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-            <span class="carousel-section-counter" id="hindiAnimeListCarouselCounter"></span>
-          </div>
-        </div>
-      </section>
-
-      <section class="trending-carousel-section" id="hindiMovieListSection">
-        <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="hindiMovieListCarouselHeading">All Hindi Movies</h2>
-        </div>
-        <div class="hianime-trending-wrap">
-          <div class="trending-carousel-viewport" id="hindiMovieListCarouselViewport">
-            <div class="trending-carousel-track" id="hindiMovieListCarouselTrack"></div>
-          </div>
-          <div class="hianime-carousel-arrows">
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('hindi-movie-list', 'prev')" aria-label="Previous slide" title="Previous slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div class="carousel-dots-wrap" id="hindiMovieListCarouselDotsWrap"></div>
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('hindi-movie-list', 'next')" aria-label="Next slide" title="Next slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-            <span class="carousel-section-counter" id="hindiMovieListCarouselCounter"></span>
+            <span class="carousel-section-counter" id="muxCarouselCounter"></span>
           </div>
         </div>
       </section>
@@ -6417,55 +6514,6 @@
         </div>
       </section>
 
-      <!-- SECTION: TRENDING NOW -->
-      <section class="trending-carousel-section" id="mbTrendingCarouselSection">
-        <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="mbTrendingCarouselHeading">Trending Now</h2>
-        </div>
-        <div class="hianime-trending-wrap">
-          <div class="trending-carousel-viewport" id="mbTrendingCarouselViewport">
-            <div class="trending-carousel-track" id="mbTrendingCarouselTrack"></div>
-          </div>
-          <div class="hianime-carousel-arrows">
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mb-trending', 'prev')" aria-label="Previous slide" title="Previous slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div class="carousel-dots-wrap" id="mbTrendingCarouselDotsWrap"></div>
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mb-trending', 'next')" aria-label="Next slide" title="Next slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-            <span class="carousel-section-counter" id="mbTrendingCarouselCounter"></span>
-          </div>
-        </div>
-      </section>
-
-      <!-- SECTION: TOP ANIME -->
-            <!-- SECTION: TV SERIES -->
-      <section class="trending-carousel-section" id="mbSeriesCarouselSection">
-        <div class="hianime-trending-header">
-          <h2 class="hianime-heading" id="mbSeriesCarouselHeading">TV Series</h2>
-        </div>
-        <div class="hianime-trending-wrap">
-          <div class="trending-carousel-viewport" id="mbSeriesCarouselViewport">
-            <div class="trending-carousel-track" id="mbSeriesCarouselTrack"></div>
-          </div>
-          <div class="hianime-carousel-arrows">
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mb-series', 'prev')" aria-label="Previous slide" title="Previous slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div class="carousel-dots-wrap" id="mbSeriesCarouselDotsWrap"></div>
-            <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('mb-series', 'next')" aria-label="Next slide" title="Next slide">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-            <span class="carousel-section-counter" id="mbSeriesCarouselCounter"></span>
-          </div>
-        </div>
-      </section>
-
-      <!-- SECTION: MOVIES -->
-            <!-- MOVIEBOX: every remaining curated section is rendered here as its own
-           stacked carousel, so nothing from the catalog is hidden. -->
-      <div id="mbExtraSections"></div>
 
       <!-- ========================================================
            HIANIME HOME: GENRES STRIP (rankings, schedule, top-10 and the
@@ -6835,6 +6883,7 @@
         <iframe id="videoIframe" class="video-frame" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="no-referrer"></iframe>
         <!-- Native Video Element (for direct HLS streams) -->
         <video id="videoNative" class="video-element" controls playsinline preload="auto" style="display: none;"></video>
+        
         <!-- Buffering indicator: the same running Pikachu, shown only while the
              player is fetching more of the file. -->
         <div id="bufferOverlay" aria-hidden="true"><img src="/pikachu-buffer.gif" alt="Buffering"/></div>
@@ -7252,6 +7301,30 @@
       return playable.length > 0 ? playable : pool;
     }
     let hlsInstance = null;
+    // On-demand hls.js. Pinned to a version instead of @latest so a CDN publish
+    // can never drop a different build on a running page; the promise is cached
+    // so two racing clicks share one network request.
+    const HLS_CDN = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js';
+    let hlsLoadPromise = null;
+    function ensureHls() {
+      if (window.Hls) return Promise.resolve(window.Hls);
+      if (hlsLoadPromise) return hlsLoadPromise;
+      hlsLoadPromise = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = HLS_CDN;
+        s.async = true;
+        s.crossOrigin = 'anonymous';
+        s.onload = () => (window.Hls ? resolve(window.Hls) : reject(new Error('hls.js loaded but exposed no Hls')));
+        s.onerror = () => reject(new Error('hls.js failed to load'));
+        document.head.appendChild(s);
+      }).catch((err) => {
+        // Let the next player attempt retry instead of caching the failure.
+        hlsLoadPromise = null;
+        throw err;
+      });
+      return hlsLoadPromise;
+    }
+    window.ensureHls = ensureHls;
     let searchTimeout = null;
     let pendingResumeTime = 0;
     let lastProgressSaveTimestamp = 0;
@@ -7778,7 +7851,7 @@
         return `
           <div class="anime-card" onclick="openPlayerById(${item.id})">
             <div class="card-poster">
-              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
               <div class="card-overlay"></div>
               <div class="card-badge-top">⭐ ${score}</div>
               <div class="card-badge-ep">${eps}</div>
@@ -7818,9 +7891,7 @@
     // CATALOG LOADING & RENDERING
     // ==========================================
     async function loadCatalog() {
-      // Both catalogs load together: the HiAnime payload drives the legacy
-      // latest/upcoming/Hindi rows, the MovieBox payload drives its own rows,
-      // the full MovieBox library grid and the spotlight carousels.
+      // The HiAnime payload drives the spotlight, trending and category rows.
       let homeData = null;
       try {
         const homeRes = await fetch('/home');
@@ -7833,29 +7904,16 @@
 
       hiHomeData = homeData;
 
-      // Phase 1 — paint everything HiAnime drives from /home alone. On a cold
-      // isolate the MovieBox ladder can run for a minute, so nothing here may
-      // wait on it: hero, trending, HiAnime rows and the manga request render
-      // from the /home payload by themselves.
-      let mbData = null;
-
       try {
-        // HiAnime stays the primary catalog: it drives the hero spotlight, the
-        // trending row and the openPlayerById lookups. The MovieBox library is
-        // only the fallback for when the HiAnime feed is unavailable — MovieBox
-        // content lives in its own rows and library grid, so neither catalog
-        // displaces the other.
         const hiCatalog = (homeData && (homeData.all || homeData.trendingAnimes)) || [];
         if (hiCatalog.length) {
           currentCatalog = hiCatalog;
-        } else if (mbData && Array.isArray(mbData.library)) {
-          currentCatalog = mbData.library;
         }
 
         const hiTrending = (homeData && (homeData.trendingAnimes || homeData.trending)) || [];
         const trendingList = hiTrending.length
           ? hiTrending
-          : ((mbData && mbData.trending && mbData.trending.length) ? mbData.trending : currentCatalog.slice(0, 18));
+          : currentCatalog.slice(0, 18);
         currentFeatured = trendingList.slice(0, 8);
         currentHeroIndex = 0;
 
@@ -7865,12 +7923,7 @@
         restartHeroAutoplay();
         initTrendingCarousel(trendingList);
 
-        // HiAnime rows first (they keep their own headings); MovieBox rows
-        // and the full MovieBox library follow in phase 2 below.
         if (homeData) renderHiAnimeHomeSections(homeData);
-
-        // Every title loaded so far also lands in the Hindi rows.
-        buildHindiCategoryRows();
       } catch (err) {
         console.warn('Catalog load failed:', err);
       }
@@ -7878,50 +7931,6 @@
       // Manga rows load on their own schedule: one extra request, and a
       // failure only hides the two rows instead of breaking the home view.
       try { loadMangaSections(); } catch (e) {}
-
-      // Phase 2 — the MovieBox ladder answers whenever it answers (capped at
-      // 15s server-side). It only paints its own rows — plus the catalog/hero
-      // fallbacks when HiAnime was unavailable — and never blocks phase 1.
-      const fetchMovieboxCatalog = async () => {
-        try {
-          const mbRes = await fetch('/api/moviebox/home', { cache: 'no-store' });
-          if (!mbRes.ok) return null;
-          const raw = await mbRes.json();
-          return (raw && raw.success) ? raw : null;
-        } catch (e) { return null; }
-      };
-      mbData = await fetchMovieboxCatalog();
-      if (!mbData) {
-        // A cold isolate answers 502 at the server cap while its in-flight
-        // ladder keeps warming that isolate; one retry on the same connection
-        // usually lands on the warm cache.
-        await new Promise((r) => setTimeout(r, 2500));
-        mbData = await fetchMovieboxCatalog();
-      }
-
-      if (mbData) {
-        try {
-          if (!currentCatalog.length || !currentFeatured.length) {
-            if (Array.isArray(mbData.library) && mbData.library.length) {
-              currentCatalog = mbData.library;
-            }
-            const trendingList = (mbData.trending && mbData.trending.length)
-              ? mbData.trending
-              : currentCatalog.slice(0, 18);
-            currentFeatured = trendingList.slice(0, 8);
-            currentHeroIndex = 0;
-            renderHero(currentFeatured[0]);
-            renderHeroThumbs(currentFeatured);
-            updateHeroDots();
-            restartHeroAutoplay();
-            initTrendingCarousel(trendingList);
-          }
-          renderMovieboxHomeSections(mbData);
-          buildHindiCategoryRows();
-        } catch (err) {
-          console.warn('MovieBox section render failed:', err);
-        }
-      }
     }
 
     // ==========================================
@@ -7994,14 +8003,12 @@
       const x = cwList()[index];
       if (!x) return;
       try {
-        if (x.kind === 'india') return openIndiaDetail(x.slug, x.type, x.title);
-        if (x.kind === 'moviebox') return openMovieboxDetail(x.slug, x.type, x.title);
         if (x.id) return openPlayerById(x.id);
       } catch (e) {}
     }
     function cwCardHtml(x, index) {
       const poster = x.poster
-        ? `<img class="slide-poster-img" src="${escapeHtml(x.poster)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(x.title)}" loading="lazy"/>`
+        ? `<img class="slide-poster-img" src="${escapeHtml(x.poster)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(x.title)}" loading="lazy" decoding="async"/>`
         : `<div class="slide-poster-img" style="width:100%;height:100%;background:linear-gradient(135deg,#241a2e,#141021);"></div>`;
       const ago = (() => {
         if (!x.ts) return '';
@@ -8058,11 +8065,8 @@
       const title = card.getAttribute('data-title') || '';
       const img = card.querySelector('img');
       const poster = img ? (img.getAttribute('src') || '') : '';
-      let m = /^openIndiaDetail\('([^']*)',\s*'([^']*)'/.exec(oc);
-      if (m) return cwTrack({ kind: 'india', slug: m[1], type: m[2], title, poster });
-      m = /^openMovieboxDetail\('([^']*)',\s*'([^']*)'/.exec(oc);
-      if (m) return cwTrack({ kind: 'moviebox', slug: m[1], type: m[2], title, poster });
-      if (/^openPlayerById\(/.test(oc)) {
+      const m = /^openPlayerById\(/.exec(oc);
+      if (m) {
         let pid = '';
         try { pid = JSON.parse(oc.slice('openPlayerById('.length, -1)); } catch (e) {}
         if (pid) cwTrack({ kind: 'player', id: String(pid), title, poster });
@@ -8082,12 +8086,9 @@
         const rankStr = rank < 10 ? '0' + rank : String(rank);
         const cover = heroImageOf(anime) || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
 
-        // Trending items are MovieBox subjects now; the click routes through
-        // the MovieBox detail/player rather than the removed AniList lookup.
-        const slug = String(anime.slug || '').replace(/[^a-zA-Z0-9\-_/:.]/g, '');
-        const click = slug
-          ? `openMovieboxDetail('${slug}', '${anime.type === 'movie' ? 'movie' : 'series'}', this.getAttribute('data-title'))`
-          : `openPlayerById(${JSON.stringify(anime.id)})`;
+        // Trending items are HiAnime titles; the click routes straight to the
+        // HiAnime detail/player.
+        const click = `openPlayerById(${JSON.stringify(anime.id)})`;
         return `
           <div class="hianime-trending-item" onclick="${click}" data-title="${escapeHtml(title)}" title="${escapeHtml(title)}">
             <div class="hianime-trend-meta">
@@ -8095,7 +8096,7 @@
               <div class="hianime-trend-num">${rankStr}</div>
             </div>
             <div class="hianime-trend-poster-wrap">
-              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
             </div>
           </div>
         `;
@@ -8299,15 +8300,10 @@
 
     function handleImgError(img) {
       if (!img) return;
-      if (!img.dataset.failedOnce) {
+      if (!img.dataset.failedOnce && img.src && !img.src.startsWith('data:') && !img.src.includes('/logo.svg')) {
         img.dataset.failedOnce = '1';
-        const originalSrc = img.dataset.src || img.src;
-        if (originalSrc && !originalSrc.startsWith('data:') && !originalSrc.includes('/api/moviebox/image-proxy')) {
-          img.src = `/api/moviebox/image-proxy?url=${encodeURIComponent(originalSrc)}`;
-          return;
-        }
+        img.src = '/logo.svg';
       }
-      img.src = '/api/moviebox/image-proxy?url=fallback';
     }
 
     function applyHero(anime) {
@@ -8507,9 +8503,9 @@ let heroSwapTimer = null;
         const inWatchlist = !!storedWatchlist[String(anime.id)];
 
         return `
-          <div class="anime-card" onclick="openPlayerById(${anime.id})">
+          <div class="anime-card" data-anime-id="${escapeHtml(String(anime.id))}" data-anime-source="${escapeHtml(anime.source || '')}" data-anime-title="${escapeHtml(title)}" onclick="openPlayerById(this.dataset.animeId, null, this.dataset.animeSource, this.dataset.animeTitle)">
             <div class="card-poster">
-              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
               <div class="card-overlay"></div>
               <div class="card-badge-top">⭐ ${score}</div>
               <div class="card-badge-ep">${eps}</div>
@@ -8541,194 +8537,6 @@ let heroSwapTimer = null;
     let cachedHomeData = null;
     let currentTop10Tab = 'today';
 
-    // The four fixed MovieBox shells keep their position, but each one now
-    // adopts the curated section that actually matches its purpose (instead of
-    // blindly taking operatingList order, which showed "Hot Short TV" under the
-    // "Trending Now" heading). Unmatched slots fall back to the next unused
-    // section, then to the bucketed feed.
-    // A row may only claim a section that actually holds its kind of content.
-    // The old code fell back to "the next unused section", so a renamed upstream
-    // catalogue ("Top Anime" is now "Anime[English Dubbed]") put live-action
-    // series under the Anime heading. Each shell now states what it accepts.
-    const mostlyIn = (items, test) => {
-      const list = Array.isArray(items) ? items : [];
-      if (!list.length) return false;
-      return list.filter(test).length * 2 >= list.length;
-    };
-    const looksAnime = (it) => /anime|animation/i.test(String(it.genre || '')) || /anime/i.test(String(it.title || ''));
-    const looksMovie = (it) => String(it.type || '').toLowerCase() === 'movie';
-    const MB_SHELLS = [
-      { cat: 'mb-trending', fallback: 'Trending Now', prefer: ['Trending Now', 'Popular Series'], accept: () => true },
-      { cat: 'mb-series',   fallback: 'TV Series',    prefer: ['Best Asian Series', 'Western TV', 'Indian Drama', 'Popular Series'], accept: (s) => mostlyIn(s.items, (it) => !looksMovie(it) && !it.short) },
-    ];
-
-    // Drop any previously appended extra rows (and their autoplay timers) so a
-    // catalog refresh never duplicates sections.
-    function resetMovieboxExtraSections() {
-      const host = document.getElementById('mbExtraSections');
-      for (const key of [...categoryCarousels.keys()]) {
-        if (!key.startsWith('mbx-')) continue;
-        stopCategoryCarouselAutoplay(categoryCarousels.get(key));
-        categoryCarousels.delete(key);
-        delete CATEGORY_DOM_PREFIX[key];
-      }
-      if (host) host.innerHTML = '';
-    }
-
-    // One appended carousel per remaining curated section. Uses the same shell
-    // markup/ids as the fixed rows, so the shared carousel engine drives it.
-    function appendMovieboxSectionCarousel(index, title, items) {
-      const host = document.getElementById('mbExtraSections');
-      if (!host || !items || !items.length) return;
-      const cat = `mbx-${index}`;
-      const prefix = `mbx${index}`;
-      CATEGORY_DOM_PREFIX[cat] = prefix;
-      host.insertAdjacentHTML('beforeend', `
-        <section class="trending-carousel-section" id="${prefix}CarouselSection">
-          <div class="hianime-trending-header">
-            <h2 class="hianime-heading" id="${prefix}CarouselHeading">${escapeHtml(title)}</h2>
-          </div>
-          <div class="hianime-trending-wrap">
-            <div class="trending-carousel-viewport" id="${prefix}CarouselViewport">
-              <div class="trending-carousel-track" id="${prefix}CarouselTrack"></div>
-            </div>
-            <div class="hianime-carousel-arrows">
-              <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('${cat}', 'prev')" aria-label="Previous slide" title="Previous slide">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-              </button>
-              <div class="carousel-dots-wrap" id="${prefix}CarouselDotsWrap"></div>
-              <button class="hianime-arrow-btn" onclick="slideCategoryCarousel('${cat}', 'next')" aria-label="Next slide" title="Next slide">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-              </button>
-              <span class="carousel-section-counter" id="${prefix}CarouselCounter"></span>
-            </div>
-          </div>
-        </section>
-      `);
-      initCategoryCarousel(cat, items);
-      updateCarouselHeading(cat, title);
-    }
-
-    // Curated MovieBox titles, kept only as the genre-filter pool: the full
-    // library grid that used to show them was removed.
-    let movieboxLibrary = [];
-
-    function renderMovieboxHomeSections(data) {
-      if (!data) return;
-      cachedHomeData = data;
-      movieboxLibrary = Array.isArray(data.library) ? data.library : [];
-
-      const sections = (Array.isArray(data.sections) ? data.sections : [])
-        .filter(s => s && s.title && Array.isArray(s.items) && s.items.length);
-
-      resetMovieboxExtraSections();
-
-      const buckets = {
-        'mb-trending': data.trending,
-        'mb-anime':    data.anime,
-        'mb-series':   data.series,
-        'mb-movies':   data.movies,
-      };
-
-      // Claim the curated section whose title matches the shell's purpose.
-      // Priority is the ORDER OF THE PREFERENCE LIST, not catalog order —
-      // scanning sections first made the low-priority fallbacks ("Hot Short TV")
-      // win over the intended section just because they came first upstream.
-      const normTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
-      // Rows deliberately hidden from the home page ("Free Now!", "Coming Soon",
-      // the Dussehra row, and the Top Anime / Cinema shells above). Matching on
-      // the normalised upstream title keeps them gone across catalogue refreshes.
-      const HIDDEN_MB_SECTIONS = new Set(['freenow', 'comingsoon', 'dussehraburaikatheend', 'topanime', 'cinema']);
-      for (let i = sections.length - 1; i >= 0; i--) {
-        if (HIDDEN_MB_SECTIONS.has(normTitle(sections[i].title))) sections.splice(i, 1);
-      }
-      const used = new Set();
-      const claim = (titles) => {
-        for (const t of titles) {
-          const key = normTitle(t);
-          for (let i = 0; i < sections.length; i++) {
-            if (used.has(i)) continue;
-            if (normTitle(sections[i].title) === key) {
-              used.add(i);
-              return sections[i];
-            }
-          }
-        }
-        return null;
-      };
-      const claimNext = () => {
-        const i = sections.findIndex((_, idx) => !used.has(idx));
-        if (i < 0) return null;
-        used.add(i);
-        return sections[i];
-      };
-
-      const claimAccepting = (accept) => {
-        if (!accept) return null;
-        const i = sections.findIndex((s, idx) => !used.has(idx) && s.items && s.items.length && accept(s));
-        if (i < 0) return null;
-        used.add(i);
-        return sections[i];
-      };
-
-      MB_SHELLS.forEach(shell => {
-        const sec = claim(shell.prefer) || claimAccepting(shell.accept);
-        let items = (sec && sec.items && sec.items.length) ? sec.items : (buckets[shell.cat] || []);
-        // A bucket that does not fit the row's own rule is worse than an empty
-        // row: the API's "anime" pool used to be filled with live-action series.
-        if (shell.cat === 'mb-anime' && items.length && !mostlyIn(items, looksAnime)) {
-          items = items.filter(looksAnime);
-        }
-        if (!items.length) {
-          // Hide the whole row, not just its cards: an empty shell left a
-          // heading with nothing under it after the row was removed.
-          const track = document.getElementById(getCategoryCarousel(shell.cat).trackId);
-          if (track) track.innerHTML = '';
-          const shellEl = document.getElementById(categoryDomPrefix(shell.cat) + 'CarouselSection');
-          if (shellEl) shellEl.style.display = 'none';
-          return;
-        }
-        initCategoryCarousel(shell.cat, items);
-        updateCarouselHeading(shell.cat, (sec && sec.title) || shell.fallback);
-      });
-
-      // Everything else the catalog curated gets its own row.
-      sections.forEach((s, i) => {
-        if (used.has(i)) return;
-        appendMovieboxSectionCarousel(i, s.title, s.items);
-      });
-
-      renderMovieboxGenres(data);
-    }
-
-    // Genre pills are built from the catalog the hero rows actually use
-    // (the HiAnime feeds). The old MovieBox-library pills are gone with the
-    // full-library grid they used to filter.
-    function renderMovieboxGenres(data) {
-      const container = document.getElementById('hianimeGenresGrid');
-      if (!container) return;
-
-      const existing = new Set(
-        [...container.querySelectorAll('.genre-tag-pill')].map(b => b.textContent.trim().toLowerCase())
-      );
-      const seen = new Set();
-      const genres = [];
-      for (const item of (data.library || [])) {
-        for (const g of String(item.genre || '').split(',').map(v => v.trim()).filter(Boolean)) {
-          const key = g.toLowerCase();
-          if (seen.has(key)) continue;
-          seen.add(key);
-          genres.push(g);
-        }
-      }
-      const list = genres.filter(g => !existing.has(g.toLowerCase())).slice(0, 24);
-      if (!list.length) return;
-
-      container.insertAdjacentHTML('beforeend', list.map(g => `
-        <button class="genre-tag-pill" title="Genre" onclick="filterGenre('${escapeHtml(g).replace(/'/g, "\\'")}')">${escapeHtml(g)}</button>
-      `).join(''));
-    }
-
     // ==========================================
     // HIANIME SECTIONS RENDERING (SCREENSHOTS 1 & 2)
     // ==========================================
@@ -8748,1296 +8556,91 @@ let heroSwapTimer = null;
       initCategoryCarousel('upcoming', data.topUpcomingAnimes);
       updateCarouselHeading('upcoming', 'Top Upcoming');
 
-      // 4. Hindi Anime (AnimeWorld-India)
-      renderHindiSection(data.indiaSeriesAnimes, data.indiaMovieAnimes);
-
-      // 5. The rest of the Hindi catalogue: the full-library rows below the
-      //    fixed Hindi Series/Movies rows. The movies library works; the series
-      //    library endpoint currently returns 0 items, so its row falls back
-      //    to the same feed the Hindi Series row uses (passed directly — a
-      //    cachedHomeData lookup can race the MovieBox render that fills it).
-      initHindiAnimeCarousel(data.indiaSeriesAnimes || []);
-      initHindiMovieCarousel();
+      initMuxSection();
     }
 
-    function renderHindiSection(series, movies) {
-      const seriesList = Array.isArray(series) ? series : [];
-      const moviesList = Array.isArray(movies) ? movies : [];
-      // Hindi rows are their own stacked carousels; the legacy grid renderers
-      // stay for browse/watchlist views that target .hianime-latest-grid.
-      renderHindiCards(seriesList, 'hindiSeriesGrid');
-      renderHindiCards(moviesList, 'hindiMoviesGrid');
-      // The India movie feed is Hindi by construction, but it is filtered
-      // anyway so a stray non-Hindi entry can never appear in this row.
-      initCategoryCarousel('hindi-movies', moviesList.filter(isHindiItem));
-      updateCarouselHeading('hindi-movies', 'Hindi Movies');
-    }
-
-    function renderHindiCards(list, gridId) {
-      const container = document.getElementById(gridId);
-      if (!container) return;
-      if (!list || !list.length) {
-        container.innerHTML = '';
-        return;
-      }
-
-      container.innerHTML = list.map(a => {
-        const title = a.title || 'Anime';
-        const cover = a.image || a.poster || a.coverImage || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
-        const year = a.year || '';
-        const rating = a.rating ? String(a.rating).replace(/^TMDB\s*/i, '').trim() : '';
-        const idAttr = a.id ? String(a.id).replace(/'/g, "\\'") : '';
-        const typeAttr = a.type === 'movie' ? 'movie' : 'series';
-
-        return `
-          <div class="hianime-card" onclick="openIndiaDetail('${idAttr}', '${typeAttr}', this.getAttribute('data-title'))" data-title="${escapeHtml(title)}">
-            <div class="hianime-poster-wrap">
-              <img src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
-              <div class="hianime-badges-over">
-                ${rating ? `<span class="badge-mic"><span>★ ${escapeHtml(rating)}</span></span>` : ''}
-              </div>
-            </div>
-            <div class="hianime-card-meta">
-              <h3 class="hianime-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
-              <div class="hianime-card-sub">
-                <span>Hindi</span>
-                ${year ? `<span class="hianime-dot">•</span><span>${escapeHtml(year)}</span>` : ''}
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-    }
-
-    function renderMbCards(list, gridId) {
-      const container = document.getElementById(gridId);
-      if (!container) return;
-      if (!list || !list.length) { container.innerHTML = ''; return; }
-
-      container.innerHTML = list.map(a => {
-        const title = a.title || 'Anime';
-        const cover = a.image || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
-        const year = a.year || '';
-        const rating = a.rating ? String(a.rating) : '';
-        const slugAttr = String(a.slug || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        const typeAttr = a.type === 'movie' ? 'movie' : 'series';
-
-        return `                <div class="hianime-card" onclick="openMovieboxDetail('${slugAttr}', '${typeAttr}', this.getAttribute('data-title'))" data-title="${escapeHtml(title)}">
-            <div class="hianime-poster-wrap">
-              <img src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
-              <div class="hianime-badges-over">
-                ${rating ? `<span class="badge-mic"><span>★ ${escapeHtml(rating)}</span></span>` : ''}
-              </div>
-            </div>
-            <div class="hianime-card-meta">
-              <h3 class="hianime-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
-              <div class="hianime-card-sub">
-                <span>${typeAttr === 'movie' ? 'Movie' : 'Series'}</span>
-                ${year ? `<span class="hianime-dot">•</span><span>${escapeHtml(year)}</span>` : ''}
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-    }
-
-    // The MovieBox episode inspector hands a specific episode to the player
-    // through this one-shot value (reset after each open).
-    let pendingEpisode = 1;
-
-    async function openMovieboxDetail(slug, type, title) {
-      if (!slug) {
-        showToastNotification('This title is unavailable right now.');
-        return;
-      }
-      showToastNotification('Loading title…');
-      try {
-        const res = await fetch(`/api/moviebox/detail?slug=${encodeURIComponent(slug)}`);
-        const json = await res.json();
-        if (!json.success || !json.detail) {
-          showToastNotification('Could not load this title.');
-          return;
-        }
-        const d = json.detail;
-
-        // Flatten seasons into the episode grid: movies play as one entry
-        // (se=0/ep=0 upstream), series enumerate se/ep pairs.
-        const epMap = [];
-        const s0 = (d.seasons && d.seasons[0]) || { se: 1, maxEp: 1 };
-        if (d.isMovie || type === 'movie') {
-          epMap.push(s0.maxEp === 0 ? { se: s0.se, ep: 0 } : { se: s0.se, ep: 1 });
-        } else {
-          for (const s of (d.seasons || [])) {
-            // `allEp` lists the episodes that really exist. Counting 1..maxEp
-            // invents the gaps (Bigg Boss reports maxEp 133 but only 63 real
-            // episodes), and every invented episode dead-ends with "No stream
-            // available" — so prefer the explicit list whenever we have one.
-            const real = Array.isArray(s.allEp) ? s.allEp.filter((n) => Number(n) > 0) : [];
-            if (real.length) {
-              for (const n of real) epMap.push({ se: s.se, ep: Number(n) });
-            } else {
-              for (let i = 1; i <= (s.maxEp || 0); i++) epMap.push({ se: s.se, ep: i });
-            }
-          }
-          if (!epMap.length) epMap.push({ se: s0.se, ep: 1 });
-        }
-
-        const isMovieboxHindi = /[\u0930-\u09FF]/.test(d.title) || /\[\s*Hindi\s*\]/i.test(d.title) || /\[\s*Hindi\s*\]/i.test(title || '');
-
-        const anime = {
-          id: 'mb-' + d.id,
-          title: { english: d.title },
-          description: d.description || '',
-          episodes: epMap.length,
-          seasonYear: d.year || '2024',
-          averageScore: d.rating ? Math.round(parseFloat(d.rating) * 10) : 0,
-          genres: d.genre ? d.genre.split(',').map(g => g.trim()).filter(Boolean) : [],
-          moviebox: {
-            subjectId: d.id,
-            slug: d.slug,
-            epMap,
-            isMovie: !!d.isMovie,
-            trailerDuration: Number(d.trailerDuration) || 0,
-          },
-        };
-
-        // MovieBox MP4 streams are audio-native (dub tracks) and are the only
-        // reason to open this title, so default the player to DUB for these
-        // cards and update the in-player audio label/buttons straight away.
-        if (isMovieboxHindi) {
-          currentAudio = 'dub';
-          currentSubLang = 'en';
-        }
-        syncAudioUI(true);
-
-        // Open the title now that `anime` exists. Both branches did the same
-        // thing, and the earlier copy of this call ran before the `const anime`
-        // above — a temporal-dead-zone ReferenceError that the catch below
-        // swallowed, so every MovieBox movie/series failed to open at all.
-        openPlayer(anime, 1, null, 0);
-      } catch (e) {
-        showToastNotification('Failed to load this title.');
-      }
-    }
-
-    // Tells the viewer that the source only holds the teaser, and marks every
-    // listed source accordingly so the label can never read as the full title.
-    function flagTrailerOnlySource(seconds) {
-      const mins = Math.floor(seconds / 60);
-      const secs = String(Math.round(seconds % 60)).padStart(2, '0');
-      showToastNotification(`Only the trailer (${mins}:${secs}) is available for this title right now.`);
-      if (Array.isArray(currentStreams) && currentStreams.length) {
-        currentStreams.forEach((s) => {
-          if (s && !/\(Trailer\)/.test(s.server || '')) {
-            s.server = `${s.server || 'Source'} (Trailer)`;
-          }
-        });
-        updateServerDropdown(currentStreams);
-      }
-    }
-
-    // Resolves a MovieBox episode through its own endpoint and plays the
-    // relayed MP4. Routed from loadStream/loadEpisodeList when
-    // selectedAnime.moviebox is set, so every player control (episode grid,
-    // next/prev, server dropdown, audio toggle) keeps working unchanged.
-    async function loadMovieboxStream(anime, episode) {
-      const loader = document.getElementById('playerLoader');
-      const loaderText = document.getElementById('playerLoaderText');
-      const iframe = document.getElementById('videoIframe');
-      const video = document.getElementById('videoNative');
-      const playOverlay = document.getElementById('videoPlayOverlay');
-
-      loader.style.display = 'flex';
-      playOverlay.style.display = 'none';
-      loaderText.textContent = 'Resolving Episode ' + episode + ' stream...';
-      iframe.style.display = 'none';
-      iframe.src = 'about:blank';
-      video.style.display = 'none';
-
-      if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
-
-      try {
-        const mb = anime.moviebox;
-        const map = (mb.epMap && mb.epMap.length) ? mb.epMap : [{ se: 1, ep: 1 }];
-        const target = map[Math.min(Math.max(episode, 1), map.length) - 1];
-        const q = new URLSearchParams({
-          subjectId: String(mb.subjectId),
-          path: String(mb.slug),
-          se: String(target.se),
-          ep: String(target.ep),
-        });
-        const res = await fetch(`/api/moviebox/stream?${q.toString()}`, { cache: 'no-store' });
-        const data = await res.json();
-        if (!data.success || (!data.sources?.length && !data.embedUrl)) {
-          loaderText.textContent = 'No stream available for this episode.';
-          return;
-        }
-        const mbSources = (data.sources || []).filter(s => s && s.url);
-        currentStreams = [];
-        // Direct files lead: they play in the ad-free native player. The
-        // MovieBox web player is pushed last as a failover only — it opens a
-        // "Please log in before payment" modal, so it must never autoplay.
-        for (const s of mbSources) {
-          const isHls = String(s.format || '').toUpperCase() === 'HLS';
-          currentStreams.push({
-            server: `${s.resolution ? s.resolution + 'p · ' : ''}${isHls ? 'HLS' : 'MP4'}`,
-            url: s.url,
-            direct: s.direct,
-            type: isHls ? 'hls' : 'mp4',
-            resolution: s.resolution,
-          });
-        }
-        // The MovieBox web player is deliberately not offered: it answers with
-        // the old "log in before payment" modal, which looks like a broken
-        // player. Only the direct files above are listed.
-        if (!currentStreams.length) {
-          loaderText.textContent = 'No stream available for this episode.';
-          return;
-        }
-
-        if (mb.trailerDuration) {
-          video.addEventListener('loadedmetadata', function checkTrailerOnly() {
-            if (Math.abs((video.duration || 0) - mb.trailerDuration) <= 3) {
-              flagTrailerOnlySource(mb.trailerDuration);
-            }
-          }, { once: true });
-        }
-        updateServerDropdown(currentStreams);
-        playStream(currentStreams[0]);
-      } catch (err) {
-        console.warn('MovieBox stream error:', err);
-        loaderText.textContent = 'Playback is preparing. Please retry in a moment.';
-      }
-    }
-
-    window.openMovieboxDetail = openMovieboxDetail;
     window.syncAudioUI = syncAudioUI;
 
 
     // ==========================================
     // CATEGORY CAROUSEL — one viewport, tabbed categories
     // ==========================================
-    // --------------------------------------------------------------------------
-    // PER-SECTION CATEGORY CAROUSELS
+    // OWNER-UPLOADED TITLES (Mux embeds)
     //
-    // The shared tabbed pane carousel was removed per feedback. Each remaining
-    // homepage category is now its own standalone carousel (one card per slide,
-    // prev/next arrows + pagination dots + counter pill, same visuals as the
-    // Trending hero carousel). This block holds the shared per-carousel state,
-    // slide/pagination/autoplay helpers, and the renderers that init each one.
-    // --------------------------------------------------------------------------
-
-    /** Map: carousel id -> its runtime state. Trending continues to use the
-     *  legacy trending-carousel state above; every other section is driven here. */
-    const categoryCarousels = new Map();
-
-    // Category keys are kebab-case ('hindi-series', 'mb-trending') but the DOM
-    // ids are camelCase prefixed with 'Carousel' ('hindiSeriesCarouselTrack').
-    // Without this map every lookup returned null and every section stayed
-    // empty while the renderers silently no-oped.
-    const CATEGORY_DOM_PREFIX = {
-      'latest': 'latest',
-      'upcoming': 'upcoming',
-      'hindi-series': 'hindiSeries',
-      'hindi-movies': 'hindiMovies',
-      'hindi-anime-list': 'hindiAnimeList',
-      'hindi-movie-list': 'hindiMovieList',
-      'mb-trending': 'mbTrending',
-      'mb-anime': 'mbAnime',
-      'mb-series': 'mbSeries',
-      'mb-movies': 'mbMovies',
-      'manga-popular': 'mangaPopular',
-      'manga-latest': 'mangaLatest',
-    };
-
-    function categoryDomPrefix(cat) {
-      return CATEGORY_DOM_PREFIX[cat] || cat;
+    // The owner adds series/movies from the Owner Portal with Mux playback
+    // IDs; the list is public and playback is the Mux player iframe inside
+    // our own player chrome. No YouTube involved and no Mux account needed on
+    // this site — the embed plays as-is.
+    // ==========================================
+    let muxContentItems = [];
+    let muxSectionStarted = false;
+    async function loadMuxContent() {
+      const res = await fetch('/api/mux/content', { cache: 'no-store' });
+      const data = await res.json();
+      if (!data || !data.success || !Array.isArray(data.items)) throw new Error('unavailable');
+      muxContentItems = data.items;
+      return data.items;
     }
-
-    function getCategoryCarousel(id) {
-      if (!categoryCarousels.has(id)) {
-        const prefix = categoryDomPrefix(id);
-        categoryCarousels.set(id, {
-          id,
-          trackId: prefix + 'CarouselTrack',
-          viewportId: prefix + 'CarouselViewport',
-          dotsWrapId: prefix + 'CarouselDotsWrap',
-          counterId: prefix + 'CarouselCounter',
-          headingId: prefix + 'CarouselHeading',
-          browseMoreId: prefix + 'CarouselBrowseMore',
-          data: [],
-          index: 0,
-          timer: null,
-          // Rows stay where the viewer put them: the owner asked for no
-          // auto-scrolling carousels anywhere on the page.
-          autoplay: false,
-        });
-      }
-      return categoryCarousels.get(id);
-    }
-
-    function updateCarouselHeading(cat, label) {
-      const heading = document.getElementById(getCategoryCarousel(cat).headingId);
-      if (heading) heading.textContent = label;
-    }
-
-    // (getVisibleCardCount lives in the trending-carousel block above — the
-    //  duplicated declaration here was shadowing it.)
-
-    // Each category row measures its own viewport, so the max index matches what
-    // the row can really show (and the dot count/counter follow suit).
-    function getCategoryVisibleCardCount(carousel) {
-      const measured = visibleCardsIn(
-        document.getElementById(carousel.viewportId),
-        document.querySelector(`#${carousel.trackId} > *`),
-        20
-      );
-      return measured || getVisibleCardCount();
-    }
-
-    function getCategoryMaxIndex(carousel) {
-      const visible = getCategoryVisibleCardCount(carousel);
-      // Count real slides from the track: a row also carries the trailing
-      // "see all" tile, which is deliberately not part of carousel.data.
-      const track = document.getElementById(carousel.trackId);
-      const total = (track && track.children.length) || carousel.data.length;
-      return Math.max(0, total - visible);
-    }
-
-    function updateCategoryCarouselPosition(carousel) {
-      const track = document.getElementById(carousel.trackId);
-      if (!track || !carousel.data.length) return;
-
-      const maxIdx = getCategoryMaxIndex(carousel);
-      if (carousel.index > maxIdx) carousel.index = maxIdx;
-      if (carousel.index < 0) carousel.index = 0;
-
-      const card = track.querySelector('.category-slide-card') || track.firstElementChild;
-      const gap = 20;
-      const cardWidth = card ? card.offsetWidth : 260;
-      // Keep the track flush with the last card instead of scrolling into the
-      // empty area past it (that gap was the visible "dead space").
-      const visible = getCategoryVisibleCardCount(carousel);
-      let moveAmount = carousel.index * (cardWidth + gap);
-      if (carousel.index >= maxIdx) {
-        // Last slide: flush the track's end with the viewport so the row never
-        // shows a blank strip past the final card.
-        const viewport = document.getElementById(carousel.viewportId);
-        const flush = Math.max(0, track.scrollWidth - (viewport ? viewport.clientWidth : 0));
-        moveAmount = flush || Math.min(moveAmount, Math.max(0, carousel.data.length - visible) * (cardWidth + gap));
-      }
-      track.style.transform = `translateX(-${moveAmount}px)`;
-
-      renderCategoryCarouselDots(carousel);
-      updateCategoryCarouselCounter(carousel);
-      updateCategoryBrowseMore(carousel, maxIdx);
-    }
-
-    // The full listing used to be reachable only via the trailing "See all" tile,
-    // i.e. only after scrolling a whole row. Show "Browse more" under the row
-    // once 5 slides have been scrolled — or at once when the row is too short to
-    // offer 5, so the option is never unreachable.
-    function updateCategoryBrowseMore(carousel, maxIdx) {
-      const btn = document.getElementById(carousel.browseMoreId);
-      if (!btn) return;
-      btn.style.display = (maxIdx > 0 && carousel.index >= Math.min(5, maxIdx)) ? 'block' : 'none';
-    }
-
-    function updateCategoryCarouselCounter(carousel) {
-      const counter = document.getElementById(carousel.counterId);
-      if (!counter) return;
-      const maxIdx = getCategoryMaxIndex(carousel);
-      const total = Math.max(1, maxIdx + 1 || carousel.data.length);
-      const current = Math.min(carousel.index + 1, total);
-      counter.textContent = `${current} / ${total}`;
-    }
-
-    // Dots are capped. A row of 130+ slides used to render 130 dots, which blew
-    // the arrows strip up to ~2000px wide and squeezed the card viewport to 0px.
-    // Above the cap the dots map proportionally onto the slide range.
-    const MAX_CAROUSEL_DOTS = 10;
-
-    function carouselDotsHtml(total, maxIdx, currentIndex, onclickFor) {
-      const dots = Math.min(total, MAX_CAROUSEL_DOTS);
-      const activeDot = activeDotIndex(dots, maxIdx, currentIndex);
-      let html = '';
-      for (let i = 0; i < dots; i++) {
-        const slide = dots === total || dots < 2 ? i : Math.round(i * maxIdx / (dots - 1));
-        html += `<button class="carousel-dot${i === activeDot ? ' active' : ''}" type="button" aria-label="Go to slide ${slide + 1}" onclick="${onclickFor(slide)}"></button>`;
-      }
-      return html;
-    }
-
-    function activeDotIndex(dots, maxIdx, currentIndex) {
-      if (dots < 2 || maxIdx < 1) return 0;
-      return Math.max(0, Math.min(dots - 1, Math.round(currentIndex * (dots - 1) / maxIdx)));
-    }
-
-    function jumpCategorySlide(cat, index) {
-      const carousel = getCategoryCarousel(cat);
-      carousel.index = Math.max(0, Math.min(index, getCategoryMaxIndex(carousel)));
-      updateCategoryCarouselPosition(carousel);
-    }
-
-    function renderCategoryCarouselDots(carousel) {
-      const wrap = document.getElementById(carousel.dotsWrapId);
-      if (!wrap) return;
-      const maxIdx = getCategoryMaxIndex(carousel);
-      const total = maxIdx + 1;
-      const signature = `${total}:${maxIdx}`;
-
-      if (wrap.dataset.dotSignature !== signature) {
-        wrap.dataset.dotSignature = signature;
-        wrap.innerHTML = carouselDotsHtml(total, maxIdx, carousel.index, (slide) => `jumpCategorySlide('${carousel.id}', ${slide})`);
-      }
-      const active = activeDotIndex(wrap.children.length, maxIdx, carousel.index);
-      [...wrap.children].forEach((dot, i) => dot.classList.toggle('active', i === active));
-    }
-
-    function jumpTrendingSlideByDot(index) {
-      jumpTrendingSlide(Math.max(0, Math.min(index, getMaxCarouselIndex())));
-    }
-
-    function startCategoryCarouselAutoplay(carousel) {
-      stopCategoryCarouselAutoplay(carousel);
-      if (!carousel.autoplay) return;
-      carousel.timer = setInterval(() => {
-        slideCategoryCarousel(carousel.id, 'next', true);
-      }, 4200);
-    }
-
-    function stopCategoryCarouselAutoplay(carousel) {
-      if (carousel.timer) {
-        clearInterval(carousel.timer);
-        carousel.timer = null;
+    async function initMuxSection() {
+      if (muxSectionStarted) return;
+      muxSectionStarted = true;
+      try {
+        const items = (await loadMuxContent())
+          .filter((it) => it && it.id && Array.isArray(it.episodes) && it.episodes.length)
+          .map((it) => ({
+            id: 'mux:' + it.id,
+            muxId: it.id,
+            title: it.title,
+            image: it.image || '',
+            type: it.type === 'movie' ? 'movie' : 'series',
+            year: it.year || '',
+            genre: it.genre || '',
+            badge: 'Hinataw',
+          }));
+        if (!items.length) throw new Error('empty');
+        initCategoryCarousel('mux', items);
+        updateCarouselHeading('mux', 'Latest Uploads');
+        const section = document.getElementById('muxSection');
+        if (section) section.style.display = '';
+      } catch (e) {
+        const section = document.getElementById('muxSection');
+        if (section) section.style.display = 'none';
       }
     }
+    window.initMuxSection = initMuxSection;
 
-    function toggleCategoryCarouselAutoplay(carousel) {
-      carousel.autoplay = !carousel.autoplay;
-      if (carousel.autoplay) {
-        startCategoryCarouselAutoplay(carousel);
-      } else {
-        stopCategoryCarouselAutoplay(carousel);
-      }
-    }
-
-    function slideCategoryCarousel(cat, dir, fromTimer) {
-      // Trending hero carousel keeps using the legacy engine.
-      if (cat === 'trending') {
-        slideTrendingCarousel(dir);
-        return;
-      }
-
-      const carousel = getCategoryCarousel(cat);
-      if (!carousel.data.length) return;
-      const maxIdx = getCategoryMaxIndex(carousel);
-
-      if (dir === 'next') {
-        carousel.index = carousel.index >= maxIdx ? 0 : carousel.index + 1;
-      } else {
-        carousel.index = carousel.index <= 0 ? maxIdx : carousel.index - 1;
-      }
-      updateCategoryCarouselPosition(carousel);
-    }
-
-    function setupCategoryCarouselGestures(carousel) {
-      const viewport = document.getElementById(carousel.viewportId);
-      if (!viewport) return;
-
-      viewport.addEventListener('mouseenter', () => stopCategoryCarouselAutoplay(carousel));
-      viewport.addEventListener('mouseleave', () => {
-        if (carousel.autoplay) startCategoryCarouselAutoplay(carousel);
-      });
-
-      viewport.addEventListener('touchstart', (e) => {
-        carouselTouchStartX = e.changedTouches[0].screenX;
-        stopCategoryCarouselAutoplay(carousel);
-      }, { passive: true });
-
-      viewport.addEventListener('touchend', (e) => {
-        carouselTouchEndX = e.changedTouches[0].screenX;
-        const diff = carouselTouchStartX - carouselTouchEndX;
-        const absDiff = Math.abs(diff);
-        if (absDiff > 30) {
-          if (diff > 0) slideCategoryCarousel(carousel.id, 'next');
-          else slideCategoryCarousel(carousel.id, 'prev');
-        } else {
-          const track = document.getElementById(carousel.trackId);
-          if (!track) return;
-          const rect = track.getBoundingClientRect();
-          const x = e.changedTouches[0].clientX - rect.left;
-          const cardWidth = track.firstElementChild ? track.firstElementChild.offsetWidth : 260;
-          const gap = 20;
-          const idx = Math.round(x / (cardWidth + gap));
-          const maxIdx = getCategoryMaxIndex(carousel);
-          if (idx >= 0 && idx <= maxIdx) {
-            carousel.index = idx;
-            updateCategoryCarouselPosition(carousel);
-          }
-        }
-        if (carousel.autoplay) startCategoryCarouselAutoplay(carousel);
-      }, { passive: true });
-    }
-
-    // Every category keeps its full item list so a row can open "see all" for
-    // exactly the titles that fall under that same category.
-    const categoryItems = new Map();
-
-    // The Hindi rows are the site's front page for content: every title from
-    // every category also appears under Hindi Series or Hindi Movies (by type),
-    // while keeping its own category row. Where both catalogs carry a title, the
-    // MovieBox copy is the one that lands here.
-    // ---- category truth ------------------------------------------------
-    // A row titled "Hindi Movies" must hold Hindi releases and "Hindi Anime"
-    // must hold anime. The curated feeds mix languages, so the Hindi rows are
-    // filtered by what each item actually is instead of trusting the section
-    // it arrived in (that is how English MovieBox titles ended up there).
-    function catalogItemText(item) {
-      if (!item) return '';
-      const t = item.title;
-      const named = typeof t === 'string' ? t : (t && (t.english || t.romaji || t.userPreferred));
-      return [named, item.rawTitle, item.slug, item.badge, item.genre, item.source]
-        .filter(Boolean).join(' ').toLowerCase();
-    }
-    function isIndiaFeedItem(item) {
-      if (!item) return false;
-      const id = String(item.id || '');
-      const src = String(item.source || '').toLowerCase();
-      return /^(goku|gokuhd|animahd|india):/i.test(id) || src === 'gokuhd.com' || src === 'animahd';
-    }
-    // Every India-feed title is a Hindi release; MovieBox items only count when
-    // their own metadata (badge or title) says Hindi.
-    function isHindiItem(item) {
-      if (!item) return false;
-      const text = catalogItemText(item);
-      const hasHindi = /(^|[^a-z])hindi([^a-z]|$)/i.test(text);
-      // The India feed also carries the odd Punjabi/Tamil/Telugu release, and
-      // a title tagged only in another language is not a Hindi title.
-      const otherLangOnly = !hasHindi && /(^|[^a-z])(punjabi|tamil|telugu|malayalam|kannada|bengali|marathi|gujarati|bhojpuri|urdu|english)([^a-z]|$)/i.test(text);
-      if (otherLangOnly) return false;
-      if (isIndiaFeedItem(item) || /hindi/i.test(String(item.badge || ''))) return true;
-      return hasHindi;
-    }
-    function isAnimeItem(item) {
-      if (!item) return false;
-      if (isIndiaFeedItem(item)) return true;
-      return /anime|animation|donghua|cartoon/i.test(String(item.genre || ''));
-    }
-    function buildHindiCategoryRows() {
-      const keys = [...categoryItems.keys()];
-      const isCurated = (k) => k.startsWith('mb-') || k.startsWith('mbx-');
-      const ordered = [...keys.filter(isCurated), ...keys.filter(k => !isCurated(k))];
-
-      const titleOf = (item) => (item.title && (item.title.english || item.title.romaji)) || item.title || '';
-      const isMovieItem = (item) => {
-        const t = String(item.type || item.format || '').toLowerCase();
-        return t === 'movie' || t === 'movies';
-      };
-
-      const seen = new Set();
-      const series = [];
-      const movies = [];
-      for (const key of ordered) {
-        for (const item of (categoryItems.get(key) || [])) {
-          // Short-form micro-dramas ("Hot Short TV") are series only in the
-          // catalogue's eyes: their episodes are 1-3 minutes, so listing them
-          // here as "Hindi Series" makes a genuine 90-second episode look like
-          // a trailer. They keep their own dedicated row instead.
-          if (item.short) continue;
-          // Only real Hindi releases belong in a Hindi row.
-          if (!isHindiItem(item)) continue;
-          const dedupeKey = catalogBaseTitle(titleOf(item));
-          if (!dedupeKey || seen.has(dedupeKey)) continue;
-          seen.add(dedupeKey);
-          (isMovieItem(item) ? movies : series).push(item);
-        }
-      }
-
-      if (series.length) {
-        initCategoryCarousel('hindi-series', series);
-        updateCarouselHeading('hindi-series', 'Hindi Series');
-      }
-      if (movies.length) {
-        initCategoryCarousel('hindi-movies', movies);
-        updateCarouselHeading('hindi-movies', 'Hindi Movies');
-      }
-    }
-
-    // Trailing tile rendered after the first cards of a longer row.
-    function seeAllTileHtml(cat, count) {
-      return `
-        <div class="category-slide-card see-all-card" onclick="showCategoryAll('${cat}')" data-title="See all ${count} titles" title="See all ${count} titles">
-          <div class="see-all-inner">
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
-            <span class="see-all-label">See all</span>
-            <span class="see-all-count">${count} titles</span>
-          </div>
-        </div>
-      `;
-    }
-
-    // Grid card that understands both catalog shapes (HiAnime & curated feeds),
-    // used by the per-category "see all" listing.
-    function gridCardHtml(item) {
-      const title = (item.title && (item.title.english || item.title.romaji)) || item.title || 'Anime';
-      const cover = item.image || (item.coverImage && (item.coverImage.extraLarge || item.coverImage.large)) || item.poster || '';
-      const rating = item.rating || (item.averageScore ? (item.averageScore / 10).toFixed(1) : '');
-      const year = item.seasonYear || item.year || '';
-      const slug = String(item.slug || '').replace(/[^a-zA-Z0-9\-_/:.]/g, '');
-      const kind = item.type === 'movie' ? 'movie' : 'series';
-      // India-feed items (gokuhd.com now, animahd before it) carry their own
-      // source slug as the id and no MovieBox slug, so "See all" cards must
-      // open the India player, which resolves seasons/episodes/stream itself.
-      const rawId = String(item.id || '').replace(/'/g, "\\'");
-      const isIndiaFeed = item.source === 'animahd' || item.source === 'gokuhd.com' || rawId.indexOf('goku:') === 0;
-      const indiaId = isIndiaFeed ? rawId : '';
-      const click = indiaId
-        ? `openIndiaDetail('${indiaId}', '${kind}', this.getAttribute('data-title'))`
-        : slug
-          ? `openMovieboxDetail('${slug}', '${kind}', this.getAttribute('data-title'))`
-          : `openPlayerById(${JSON.stringify(item.id)})`;
-      const typeLabel = item.type ? (kind === 'movie' ? 'Movie' : 'Series') : (item.format || 'TV');
-
-      return `
-        <div class="hianime-card" onclick="${click}" data-title="${escapeHtml(title)}">
-          <div class="hianime-poster-wrap">
-            <img src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
-            <div class="hianime-badges-over">
-              ${rating ? `<span class="badge-mic"><span>★ ${escapeHtml(String(rating))}</span></span>` : ''}
-            </div>
-          </div>
-          <div class="hianime-card-meta">
-            <h3 class="hianime-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
-            <div class="hianime-card-sub">
-              <span>${escapeHtml(typeLabel)}</span>
-              ${year ? `<span class="hianime-dot">•</span><span>${escapeHtml(String(year))}</span>` : ''}
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
-    // Full listing for one category, reusing the results grid + banner.
-    function showCategoryAll(cat) {
-      const items = categoryItems.get(cat) || [];
-      if (!items.length) return;
-      const carousel = getCategoryCarousel(cat);
-      const headingEl = document.getElementById(carousel.headingId);
-      // The trending row's title lives in the hero heading, not a carousel one.
-      const heading = (headingEl && headingEl.textContent.trim())
-        || (cat === 'trending' ? 'Trending' : 'Category');
-
-      const dView = document.getElementById('discoverView');
-      if (dView) dView.style.display = 'none';
-      const srb = document.getElementById('searchResultsBanner');
-      if (srb) srb.classList.add('active');
-      const srs = document.getElementById('searchResultsSection');
-      if (srs) srs.style.display = 'block';
-      const srt = document.getElementById('searchResultsTitle');
-      if (srt) srt.textContent = `${heading} — all ${items.length} titles`;
-      const src = document.getElementById('searchResultsCount');
-      if (src) src.textContent = `${items.length} titles in this category`;
-
-      const grid = document.getElementById('searchGrid');
-      if (grid) grid.innerHTML = items.map(gridCardHtml).join('');
-      if (srs) srs.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-
-    // Creates a row's "Browse more" button under its controls, once.
-    function ensureCategoryBrowseMore(carousel) {
-      if (document.getElementById(carousel.browseMoreId)) return;
-      const viewport = document.getElementById(carousel.viewportId);
-      const wrap = viewport && viewport.parentElement;
-      if (!wrap || !wrap.parentElement) return;
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.id = carousel.browseMoreId;
-      btn.className = 'carousel-browse-more';
-      btn.textContent = 'Browse more';
-      btn.addEventListener('click', () => showCategoryAll(carousel.id));
-      wrap.parentElement.insertBefore(btn, wrap.nextSibling);
-    }
-
-    /** Initialize one of the stacked category carousels. `list` is the array of
-     *  anime items for that section; the section's track is populated from them
-     *  and the section is shown (category carousels are never gated by tabs). */
-    function initCategoryCarousel(cat, list) {
-      const carousel = getCategoryCarousel(cat);
-      const items = Array.isArray(list) ? list : [];
-      carousel.data = items;
-      carousel.index = 0;
-      categoryItems.set(cat, items);
-
-      // Populate the section's track using the existing section renderers so the
-      // cards keep their original markup/interaction (watch buttons, etc.).
-      renderCategoryCarouselTrack(cat, items);
-      ensureCategoryBrowseMore(carousel);
-
-      updateCategoryCarouselPosition(carousel);
-      startCategoryCarouselAutoplay(carousel);
-      setupCategoryCarouselGestures(carousel);
-      installCategoryResizeHandler();
-    }
-
-    // Card counts are measured from the DOM, so a resize must re-measure every
-    // row; otherwise the rows keep the previous viewport's pagination.
-    let categoryResizeBound = false;
-    function installCategoryResizeHandler() {
-      if (categoryResizeBound) return;
-      categoryResizeBound = true;
-      window.addEventListener('resize', () => {
-        for (const carousel of categoryCarousels.values()) {
-          if (carousel.data.length) updateCategoryCarouselPosition(carousel);
-        }
-      });
-    }
-
-    function renderCategoryCarouselTrack(cat, items) {
-      const track = document.getElementById(getCategoryCarousel(cat).trackId);
-      if (!track) return;
-
-      if (!items || !items.length) {
-        track.innerHTML = '<div class="carousel-empty-state" style="padding: 24px; color: var(--text-faint); font-size: 13px;">No titles available right now.</div>';
-        return;
-      }
-
-      // Manga rows keep their own card shape: no watchlist/star controls, a
-      // chapter pill instead of a rating, and clicks open the manga detail.
-      if (cat === 'manga-popular' || cat === 'manga-latest') {
-        track.innerHTML = items
-          .map((m, index) => mangaSlideCardHtml(m, index))
-          .join('') + (items.length > 5 ? mangaSeeAllTileHtml(cat, items.length) : '');
-        return;
-      }
-
-      const slideCards = items.map((anime, index) => {
-        const title = (anime.title && (anime.title.english || anime.title.romaji)) || anime.title || 'Anime';
-        // `image` is the poster field for the Hindi and MovieBox feeds; ignoring it
-        // made every one of those cards fall back to the same placeholder art.
-        const cover = anime.image || (anime.coverImage && (anime.coverImage.extraLarge || anime.coverImage.large)) || anime.poster || anime.coverImage || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
-        const rating = anime.rating || anime.averageScore || '';
-        const rank = (anime.rank != null ? anime.rank : index + 1);
-        const rankStr = rank < 10 ? '0' + rank : String(rank);
-        const subtitle = (anime.title && anime.title.romaji) || '';
-        const year = anime.seasonYear || anime.year || '';
-        const type = anime.type || anime.format || '';
-
-        const tags = [];
-        if (rating) tags.push({ label: String(rating), highlight: !!rating });
-        if (type) tags.push({ label: type });
-        // Make the language explicit on Hindi titles whose card title does
-        // not already carry [Hindi] in it.
-        if (isHindiItem(anime) && !/(^|[^a-z])hindi([^a-z]|$)/i.test(String(title))) {
-          tags.push({ label: 'Hindi' });
-        }
-        if (year) tags.push({ label: year });
-
-        // The Hindi rows are fed by the India catalogue (gokuhd.com now, animahd
-        // before it): those ids are source slugs with no MovieBox slug, so they
-        // must open through the India player, which resolves seasons/episodes/
-        // stream itself. Everything else stacked here is MovieBox/HiAnime-fed.
-        const cardSlug = String(anime.slug || '').replace(/[^a-zA-Z0-9\-_/:.]/g, '');
-        const rawIndiaId = String(anime.id || '').replace(/'/g, "\\'");
-        const isIndiaFeed = anime.source === 'animahd' || anime.source === 'gokuhd.com' || rawIndiaId.indexOf('goku:') === 0;
-        const indiaId = isIndiaFeed ? rawIndiaId : '';
-        const onclickAttr = indiaId
-          ? `onclick="openIndiaDetail('${indiaId}', '${anime.type === 'movie' ? 'movie' : 'series'}', this.getAttribute('data-title'))"`
-          : cardSlug
-            ? `onclick="openMovieboxDetail('${cardSlug}', '${anime.type === 'movie' ? 'movie' : 'series'}', this.getAttribute('data-title'))"`
-            : `onclick="openPlayerById(${JSON.stringify(anime.id)})"`;
-
-        return `
-          <div class="category-slide-card" ${onclickAttr} data-title="${escapeHtml(title)}">
-            <div class="slide-poster-wrap">
-              <img class="slide-poster-img" src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
-              <div class="slide-overlay"></div>
-              <span class="trending-rank-badge">${rankStr}</span>
-              ${rating ? `<span class="trending-score-pill">⭐ ${escapeHtml(rating)}</span>` : ''}
-              <div class="slide-play-action">
-                <button class="slide-play-btn" type="button">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                </button>
-              </div>
-            </div>
-            <div class="slide-content-wrap">
-              <div class="slide-title-group">
-                <div class="slide-anime-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-                ${subtitle ? `<div class="slide-anime-romaji">${escapeHtml(subtitle)}</div>` : ''}
-              </div>
-              <div class="slide-tags-row">
-                ${tags.map(t => `<span class="slide-tag${t.highlight ? ' highlight' : ''}">${escapeHtml(t.label)}</span>`).join('')}
-              </div>
-              <div class="slide-footer-row">
-                <button class="slide-watch-now-btn" type="button">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                  Watch Now
-                </button>
-                <button class="slide-watchlist-btn" type="button" title="Add to Watchlist">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-                </button>
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-
-      // Longer rows end with a tile that opens every title of this category.
-      track.innerHTML = slideCards + (items.length > 5 ? seeAllTileHtml(cat, items.length) : '');
-    }
-
-    // (Legacy tabbed-pane arrow handler removed: it shadowed the per-section
-    //  slideCategoryCarousel(cat, dir) above via function hoisting, so every
-    //  arrow click and autoplay tick ran the dead pane code and threw.)
-
-    function openIndiaDetail(id, type, title) {
-      if (!id) {
+    function openMuxDetail(muxId) {
+      const item = muxContentItems.find((it) => it && it.id === muxId);
+      if (!item || !Array.isArray(item.episodes) || !item.episodes.length) {
         showToastNotification('This title is unavailable right now.');
         return;
       }
-      if (type === 'movie') {
-        openIndiaStream({ movieId: id }, title || 'Hindi Movie');
-        return;
-      }
-      openIndiaSeasons(id, title || 'Hindi Anime');
+      const options = item.episodes.map((ep) => ({
+        episodeId: 'mux:' + item.id + ':' + ep.ep,
+        title: ep.title || (item.episodes.length > 1 ? `Episode ${ep.ep}` : item.title),
+        episodeNumber: String(ep.ep),
+        image: item.image || '',
+        muxEmbed: ep.embedUrl,
+      }));
+      const animeObj = {
+        id: 'mux-' + item.id,
+        title: { english: item.title, romaji: '' },
+        description: item.description || '',
+        episodes: options.length,
+        genres: item.genre ? [item.genre] : ['Hinataw'],
+        seasonYear: item.year || '',
+        muxEpisodes: options,
+      };
+      openPlayer(animeObj, 1, null, null, true, true);
+      currentEpisodeList = options;
+      renderEpisodeGrid(options.length, 1, options);
+      const badge = document.getElementById('modalEpBadge');
+      if (badge && options[0].title) badge.textContent = options[0].title;
+      currentStreams = [{ server: 'Mux', embedUrl: options[0].muxEmbed, type: 'embed' }];
+      updateServerDropdown(currentStreams);
+      playStream(currentStreams[0]);
     }
-
-    async function openIndiaSeasons(seriesID, title) {
-      showToastNotification('Loading seasons…');
-      try {
-        const res = await fetch(`/api/india/seasons?seriesID=${encodeURIComponent(seriesID)}`);
-        const json = await res.json();
-        if (!json.success || !json.seasons || !json.seasons.length) {
-          showToastNotification('No seasons found for this title.');
-          return;
-        }
-        const first = json.seasons[0];
-        const seasonId = first.seasonId || first.id || first.season;
-        if (!seasonId) {
-          showToastNotification('Could not read season list.');
-          return;
-        }
-        openIndiaEpisodes(seasonId, title, json.seasons, first.seasonNumber);
-      } catch (e) {
-        showToastNotification('Failed to load seasons.');
-      }
-    }
-
-    async function openIndiaEpisodes(seasonId, title, seasons = null, seasonNumber = null) {
-      showToastNotification('Loading episodes…');
-      try {
-        const res = await fetch(`/api/india/episodes?seasonId=${encodeURIComponent(seasonId)}`);
-        const json = await res.json();
-        if (!json.success || !json.episodes || !json.episodes.length) {
-          showToastNotification('No episodes found.');
-          return;
-        }
-        const first = json.episodes[0];
-        const episodeId = first.episodeId || first.id || first.episode;
-        if (!episodeId) {
-          showToastNotification('Could not read episode list.');
-          return;
-        }
-        // GokuHD publishes whole-season files with several quality/mirror
-        // options instead of one stream per episode, so hand the player the
-        // full option list rather than silently dropping all but the first.
-        const options = json.episodes
-          .map((e) => ({
-            episodeId: e.episodeId || e.id || e.episode,
-            title: e.title || '',
-            episodeNumber: e.episodeNumber || '',
-            season: e.season || '',
-          }))
-          .filter((e) => e.episodeId);
-        openIndiaStream({ episodeId }, title, options, 1, seasons, seasonNumber);
-      } catch (e) {
-        showToastNotification('Failed to load episodes.');
-      }
-    }
-
-    async function openIndiaStream(ids, title, episodeOptions = null, activeIndex = 1, seasons = null, seasonNumber = null) {
-      // Owner ad: one popup per Hindi episode/movie opened.
-      fireOwnerAd('india:' + (ids.episodeId || ids.movieId || 'title'));
-      showToastNotification('Resolving stream…');
-      try {
-        const params = new URLSearchParams();
-        if (ids.episodeId) params.set('episodeId', ids.episodeId);
-        if (ids.movieId) params.set('movieId', ids.movieId);
-        const res = await fetch(`/api/india/stream?${params.toString()}`);
-        const json = await res.json();
-        if (!json.success) {
-          showToastNotification('Could not resolve a stream for this title.');
-          return;
-        }
-        const streams = (json.streams && json.streams.length)
-          ? json.streams
-          : (json.stream ? [{ url: json.stream, label: 'Server 1' }] : []);
-        const first = streams[0];
-        // ToonStream and friends answer with embed player pages instead of
-        // files, so an embedUrl is just as playable as a url here.
-        const streamUrl = first && (first.url || first.stream || first.embedUrl);
-        if (!streamUrl) {
-          showToastNotification('No playable link found.');
-          return;
-        }
-
-        // The source's per-file options (1080p, 720p, mirrors, batch) become the
-        // episode list, so the panel offers everything the post actually has.
-        const options = Array.isArray(episodeOptions)
-          ? episodeOptions.filter((o) => o && o.episodeId)
-          : [];
-        const activeEp = Math.max(1, Number(activeIndex) || 1);
-        const animeObj = {
-          id: 'india-' + (ids.episodeId || ids.movieId || 'title'),
-          title: { english: title || 'Hindi Title', romaji: '' },
-          description: '',
-          episodes: options.length || 1,
-          indiaEpisodes: options,
-          indiaSeasons: Array.isArray(seasons) && seasons.length > 1 ? seasons : null,
-          indiaSeasonNumber: seasonNumber,
-          genres: ['Hindi', 'India']
-        };
-        // Skip openPlayer's own stream resolution: the India API already
-        // returned the playable URL below, and a second resolution would hide
-        // the video element that is about to play it.
-        openPlayer(animeObj, activeEp, null, null, true);
-
-        if (options.length) {
-          currentEpisodeList = options;
-          renderEpisodeGrid(options.length, activeEp, options);
-          // Name the option instead of numbering it: "Episode 1" would imply an
-          // episode the source does not publish.
-          const badge = document.getElementById('modalEpBadge');
-          if (badge && options[activeEp - 1]?.title) badge.textContent = options[activeEp - 1].title;
-          renderIndiaSeasonPills(seasonNumber ?? options[activeEp - 1]?.season);
-        }
-
-        const toStreamEntry = (s, hidden) => {
-          const rawUrl = String(s.url || s.stream || '');
-          // An entry is an embed only when it has no direct file: a direct
-          // mirror may also carry embedUrl for failover, and treating it as
-        // an embed would auto-play the gated MovieBox player (login modal).
-          const looksEmbed = s.type === 'embed' || rawUrl.includes('/embed') || rawUrl.includes('/e/') || rawUrl.includes('/spa/');
-          const isEmbed = looksEmbed || (!rawUrl && Boolean(s.embedUrl));
-          const directUrl = isEmbed ? '' : rawUrl;
-          const embedUrl = isEmbed ? (s.embedUrl || rawUrl) : '';
-          // Hosts that only answer with the paywall/login modal are not
-          // players: dropping them here keeps the server list honest.
-          const gated = isEmbed && /moviebox|netfilm|aoneroom|\/spa\//i.test(embedUrl || rawUrl || '');
-          if (gated) return null;
-          return {
-            server: s.label || s.server || (s.quality ? `${s.quality}` : (isEmbed ? 'Stream Player' : 'Auto')),
-            url: directUrl,
-            embedUrl: embedUrl,
-            type: isEmbed ? 'embed' : 'mp4',
-            resolution: s.quality || '',
-            hidden: Boolean(hidden)
-          };
-        };
-        currentStreams = [
-          ...streams.map((s) => toStreamEntry(s, false)),
-          ...((json.fallbacks || []).map((s) => toStreamEntry(s, true)))
-        ].filter(Boolean);
-        updateServerDropdown(currentStreams);
-        if (currentStreams.length) {
-          // Lead with a direct file when one exists: embed players (whose
-          // MovieBox copy shows a login/payment modal) only play as failover.
-          const autoIdx = currentStreams.findIndex(s => s && s.url);
-          playStream(currentStreams[autoIdx >= 0 ? autoIdx : 0]);
-        } else {
-          showToastNotification('No playable link found.');
-        }
-      } catch (e) {
-        showToastNotification('Failed to load stream links.');
-      }
-    }
-
-    // Season pills for multi-season Hindi titles: renderEpisodeGrid owns the
-    // range bar, so it is repurposed here once the season list is known.
-    function renderIndiaSeasonPills(activeSeason) {
-      const seasons = selectedAnime && selectedAnime.indiaSeasons;
-      const bar = document.getElementById('epRangeBar');
-      if (!bar || !Array.isArray(seasons) || seasons.length < 2) return;
-      bar.style.display = 'flex';
-      // A pack season repeats the episode-wise season numbers, so the label has
-      // to name it ("Season 1 (pack)") instead of showing "Season 1" twice.
-      const duplicateNumbers = seasons
-        .map((s) => String(s.seasonNumber))
-        .filter((n, i, arr) => arr.indexOf(n) !== i);
-      bar.innerHTML = seasons
-        .map((s) => {
-          const n = Number(s.seasonNumber);
-          const active = String(s.seasonNumber) === String(activeSeason) ? 'active' : '';
-          let label = `Season ${n}`;
-          if (/pack/i.test(String(s.seasonName || ''))) {
-            label = `Season ${n} (pack)`;
-          } else if (duplicateNumbers.includes(String(s.seasonNumber))) {
-            label = `Season ${n} (alt)`;
-          }
-          // Click by seasonId, not by number: an episode-wise season and a
-          // pack season can share a number, and the number alone would open the
-          // wrong one.
-          return `<button class="ep-range-tab-btn ${active}" onclick="selectIndiaSeason('${encodeURIComponent(String(s.seasonId || n))}')">${label}</button>`;
-        })
-        .join('');
-    }
-
-    async function selectIndiaSeason(encodedSeasonId) {
-      const seasons = selectedAnime && selectedAnime.indiaSeasons;
-      if (!Array.isArray(seasons) || !seasons.length) return;
-      const wanted = decodeURIComponent(String(encodedSeasonId));
-      const target = seasons.find((s) => String(s.seasonId) === wanted) ||
-        seasons.find((s) => String(s.seasonNumber) === wanted);
-      if (!target) return;
-      const seasonNumber = target.seasonNumber;
-      showToastNotification(`Loading Season ${seasonNumber}…`);
-      try {
-        const res = await fetch(`/api/india/episodes?seasonId=${encodeURIComponent(target.seasonId)}`);
-        const json = await res.json();
-        const options = ((json && json.episodes) || [])
-          .map((e) => ({
-            episodeId: e.episodeId || e.id || e.episode,
-            title: e.title || '',
-            episodeNumber: e.episodeNumber || '',
-            season: e.season || seasonNumber || '',
-          }))
-          .filter((o) => o.episodeId);
-        if (!options.length) {
-          showToastNotification('No episodes found for this season.');
-          return;
-        }
-        const indiaTitle = selectedAnime.title?.english ||
-          (typeof selectedAnime.title === 'string' ? selectedAnime.title : 'Hindi Title');
-        openIndiaStream({ episodeId: options[0].episodeId }, indiaTitle, options, 1, seasons, Number(seasonNumber));
-      } catch (e) {
-        showToastNotification('Failed to load this season.');
-      }
-    }
-
-    window.openIndiaDetail = openIndiaDetail;
-    window.openIndiaSeasons = openIndiaSeasons;
-    window.openIndiaEpisodes = openIndiaEpisodes;
-    window.openIndiaStream = openIndiaStream;
-    window.selectIndiaSeason = selectIndiaSeason;
-
-    // ==========================================
-    // HINDI MOVIES ROW (carousel)
-    //
-    // Fed by /api/india/movies-library — animahd's six Hindi anime movies merged
-    // with MovieBox's curated Hindi movies and its cartoon movies (Doraemon,
-    // Shinchan, Pokémon, Motu Patlu, ...). The old grid showed only the six,
-    // which is why the row read as "many movies aren't present".
-    // ==========================================
-    let hindiMovieCarouselStarted = false;
-    async function initHindiMovieCarousel() {
-      if (hindiMovieCarouselStarted) return;
-      hindiMovieCarouselStarted = true;
-      try {
-        const res = await fetch('/api/india/movies-library', { cache: 'no-store' });
-        const data = await res.json();
-        // The library is MovieBox's whole movie pool, so a Punjabi/Tamil release
-        // can sit in it; a Hindi row keeps only titles that really are Hindi.
-        const items = ((data && data.success && data.items) || []).filter((i) => i && i.title && isHindiItem(i));
-        if (!items.length) throw new Error('empty library');
-        initCategoryCarousel('hindi-movie-list', items);
-        updateCarouselHeading('hindi-movie-list', 'All Hindi Movies');
-      } catch (e) {
-        const track = document.getElementById('hindiMovieListCarouselTrack');
-        if (track) {
-          track.innerHTML = '<div class="carousel-empty-state" style="padding: 24px; color: var(--text-faint); font-size: 13px;">Hindi movies unavailable right now.</div>';
-        }
-      }
-    }
-    window.initHindiMovieCarousel = initHindiMovieCarousel;
-
-    // ==========================================
-    // HINDI ANIME ROW (carousel)
-    //
-    // The whole series catalogue, not a page of it: page 1 reports how many
-    // pages exist, the rest are fetched in parallel, and the combined list feeds
-    // the site's standard category carousel (arrows, dots, swipe, autoplay) so
-    // all 201 titles are browsable without a 17,000px vertical grid. The row's
-    // "See all" tile then lists every one of them in the grid view.
-    // ==========================================
-    // HiAnime-title verification for the Hindi Anime row: /api/hianime/search
-    // is fuzzy, so a candidate only counts when one of its results has a name
-    // that normalizes to exactly the [Hindi]-stripped candidate title.
-    const _hianimeMatchCache = new Map();
-    function _normTitle(s) {
-      return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-    }
-
-    const stripTag = (c) => String(c.title || '').replace(/\s*\[hindi\]\s*/i, '').trim();
-    // "Blue Box (Season 1 & 2)" must match HiAnime's "Blue Box": the catalog
-    // check compares the normalized title and its season/year-free forms.
-    function animeTitleKeys(raw) {
-      const base = _normTitle(raw);
-      const keys = new Set();
-      if (base) keys.add(base);
-      const noSeason = base.replace(/\b(season|part|cour|chapter|movie|ova|ona|special)s?\b.*$/, '').trim();
-      if (noSeason.length >= 4) keys.add(noSeason);
-      const noYear = base.replace(/\b(19|20)\d{2}\b.*$/, '').trim();
-      if (noYear.length >= 4) keys.add(noYear);
-      return [...keys];
-    }    async function hianimeHasTitle(strippedTitle) {
-      const key = _normTitle(strippedTitle);
-      if (!key) return false;
-      if (_hianimeMatchCache.has(key)) return _hianimeMatchCache.get(key);
-      let ok = false;
-      try {
-        const res = await fetch('/api/hianime/search?q=' + encodeURIComponent(strippedTitle), { cache: 'no-store' });
-        const d = await res.json();
-        const animes = (d && d.animes) || [];
-        ok = animes.some((a) => _normTitle(a.title) === key || _normTitle(a.name) === key || _normTitle(a.jname) === key);
-      } catch (e) {}
-      _hianimeMatchCache.set(key, ok);
-      return ok;
-    }
-    // Run async checks over a list with bounded concurrency (5 parallel) so a
-    // slow upstream neither floods the endpoint nor stalls the row forever.
-    async function filterByConcurrency(list, limit, fn) {
-      const out = new Array(list.length);
-      let i = 0;
-      async function worker() {
-        while (i < list.length) {
-          const idx = i++;
-          out[idx] = await fn(list[idx], idx);
-        }
-      }
-      await Promise.all(Array.from({ length: Math.min(limit, list.length) }, worker));
-      return out;
-    }
-
-
-let hindiAnimeCarouselStarted = false;
-    async function initHindiAnimeCarousel(fallbackList) {
-      if (hindiAnimeCarouselStarted) return;
-      hindiAnimeCarouselStarted = true;
-      const per = 100; // the endpoint's cap
-      const loadPage = (p) => fetch(`/api/india/library?p=${p}&per=${per}&type=series`, { cache: 'no-store' })
-        .then((r) => r.json())
-        .catch(() => null);
-      try {
-        const first = await loadPage(1);
-        if (!first || !first.success) throw new Error('catalogue unavailable');
-        const rest = await Promise.all(
-          Array.from({ length: Math.max(0, (first.totalPages || 1) - 1) }, (_, i) => loadPage(i + 2))
-        );
-        let items = [first, ...rest]
-          .flatMap((d) => (d && d.success ? d.items || [] : []))
-          .filter((i) => i && i.id);
-        if (!items.length) {
-          // The library endpoint currently reports success but 0 items; fall
-          // back to the same feed that fills the fixed Hindi Series row and
-          // widen it with the [Hindi]-tagged titles from the MovieBox library
-          // (already fetched for the other rows), deduped by title.
-          // HiAnime rows render before the MovieBox rows, so the library
-          // may not be cached yet — fetch it directly in that case.
-          if (!Array.isArray(movieboxLibrary) || !movieboxLibrary.length) {
-            try {
-              const mb = await fetch('/api/moviebox/home', { cache: 'no-store' }).then((r) => r.json());
-              if (mb && mb.success) { movieboxLibrary = mb.library || []; }
-            } catch (e2) {}
-          }
-          const base = (Array.isArray(fallbackList) && fallbackList.length)
-            ? fallbackList
-            : (cachedHomeData && cachedHomeData.indiaSeriesAnimes) || [];
-          const mbHindi = (Array.isArray(movieboxLibrary) ? movieboxLibrary : [])
-            .filter((i) => i && isHindiItem(i) && isAnimeItem(i));
-          const seen = new Set();
-          const candidates = [...base, ...mbHindi].filter((i) => {
-            const k = String(i.title).toLowerCase().trim();
-            if (!k || seen.has(k)) return false;
-            seen.add(k);
-            return true;
-          });
-          // Every candidate is HiAnime-verified just below (catalog pass, or
-          // per-title search when the catalog is thin), so a live-action show
-          // tagged [Hindi] cannot reach the row.
-          const fallback = candidates;
-          if (fallback.length) items.push(...fallback);
-        }
-        if (!items.length) throw new Error('empty catalogue');
-        // The library mixes live-action in with anime, so this row (titled
-        // "Hindi Anime") keeps only titles HiAnime itself carries and says
-        // [Hindi] in their name. One catalog call covers every item — a search
-        // per item was both slow and strict about season suffixes. If the
-        // catalog comes back thin the row keeps its full list instead of
-        // rendering almost empty.
-        try {
-          const catalog = await fetch('/api/hianime/catalog?page=1&limit=1000', { cache: 'no-store' })
-            .then((r) => r.json())
-            .catch(() => null);
-          // HiAnime's synced items carry the name as { english, romaji }, so
-          // every spelling of it has to be indexed, not just one field.
-          const known = new Map();
-          for (const a of ((catalog && catalog.animes) || [])) {
-            const t = a && a.title;
-            const display = (t && (t.english || t.romaji)) || (a && (a.name || a.jname)) || (typeof t === "string" ? t : "");
-            if (!display) continue;
-            for (const name of [t && t.english, t && t.romaji, a && a.name, a && a.jname, typeof t === "string" ? t : null]) {
-              const key = _normTitle(name);
-              if (key && !known.has(key)) known.set(key, display);
-            }
-          }
-          if (known.size >= 20) {
-            const matched = [];
-            for (const it of items) {
-              const key = animeTitleKeys(stripTag(it)).find((k) => known.has(k));
-              // The row shows HiAnime's own name for the title (the Hindi
-              // library's raw name carries release junk) plus the language tag.
-              if (key) matched.push({ ...it, title: known.get(key) + " [Hindi]" });
-            }
-            // Strict: only titles HiAnime carries survive. The old
-            // "keep everything when fewer than 5 matched" rule is what put
-            // live-action series in a row called "Hindi Anime".
-            const seenMatch = new Set();
-            items = matched.filter((it) => {
-              const k = _normTitle(it.title);
-              if (!k || seenMatch.has(k)) return false;
-              seenMatch.add(k);
-              return true;
-            });
-          } else {
-            // Catalog unavailable: verify candidates against HiAnime's search
-            // (fuzzy, so compare normalized names) with bounded concurrency and
-            // keep only real HiAnime titles. Better a short row than a row of
-            // shows HiAnime does not carry at all.
-            const checked = await filterByConcurrency(items.slice(0, 60), 5, async (it) => {
-              const ok = await hianimeHasTitle(stripTag(it));
-              const name = stripTag(it);
-              return ok && name ? { ...it, title: name + " [Hindi]" } : null;
-            });
-            const seenVerified = new Set();
-            items = checked.filter((it) => {
-              if (!it) return false;
-              const k = _normTitle(it.title);
-              if (!k || seenVerified.has(k)) return false;
-              seenVerified.add(k);
-              return true;
-            });
-          }
-          if (!items.length) throw new Error('no HiAnime matches');
-        } catch (e) {}        initCategoryCarousel('hindi-anime-list', items);
-        updateCarouselHeading('hindi-anime-list', 'Hindi Anime');
-      } catch (e) {
-        const track = document.getElementById('hindiAnimeListCarouselTrack');
-        if (track) {
-          track.innerHTML = ' <div class="carousel-empty-state" style="padding: 24px; color: var(--text-faint); font-size: 13px;">Hindi catalogue unavailable right now.</div>'.trim();
-        }
-      }
-    }
-    window.initHindiAnimeCarousel = initHindiAnimeCarousel;
-
-    // Drawer shortcuts to the two Hindi sections. The sections only exist on
-    // the home view, so switch there first and scroll once the view has been
-    // laid out (two frames: one to render, one to have real geometry).
-    function openHindiSection(which) {
-      const id = which === 'movies' ? 'hindiMovieListSection' : 'hindiAnimeListSection';
-      navigateToView('home');
-      requestAnimationFrame(() => requestAnimationFrame(() => scrollToSection(id)));
-    }
-    window.openHindiSection = openHindiSection;
+    window.openMuxDetail = openMuxDetail;
 
     function renderTopUpcoming(list) {
       const container = document.getElementById('topUpcomingGrid');
@@ -10056,7 +8659,7 @@ let hindiAnimeCarouselStarted = false;
         return `
           <div class="hianime-card" onclick="openPlayerById(${anime.id})">
             <div class="hianime-poster-wrap">
-              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
               ${badge ? `
                 <div class="hianime-badges-over">
                   <span class="badge-mic">
@@ -10095,7 +8698,7 @@ let hindiAnimeCarouselStarted = false;
         return `
           <div class="hianime-card" onclick="openPlayerById(${anime.id})">
             <div class="hianime-poster-wrap">
-              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+              <img src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
               <div class="hianime-badges-over">
                 ${sub > 0 ? `
                   <span class="badge-cc" title="${sub} Subtitled Episodes">
@@ -10170,7 +8773,7 @@ let hindiAnimeCarouselStarted = false;
         return `
           <div class="top10-item" onclick="openPlayerById(${anime.id})">
             <span class="top10-num">${rank}</span>
-            <img class="top10-thumb" src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+            <img class="top10-thumb" src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
             <div class="top10-info">
               <span class="top10-anime-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
               <div class="hianime-rank-badges">
@@ -10204,7 +8807,7 @@ let hindiAnimeCarouselStarted = false;
 
           return `
             <div class="hianime-rank-item" onclick="openPlayerById(${anime.id})">
-              <img class="hianime-rank-thumb" src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+              <img class="hianime-rank-thumb" src="${cover}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
               <div class="hianime-rank-details">
                 <span class="hianime-rank-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
                 <div class="hianime-rank-badges">
@@ -10267,7 +8870,7 @@ let hindiAnimeCarouselStarted = false;
         return;
       }
 
-      const pool = movieboxLibrary.length ? movieboxLibrary : (currentCatalog || []);
+      const pool = currentCatalog || [];
       const filtered = pool.filter(a => genresOf(a).some(g => g.toLowerCase() === genre.toLowerCase()));
 
       initCategoryCarousel('latest', filtered.length ? filtered : hiLatest);
@@ -10282,17 +8885,17 @@ let hindiAnimeCarouselStarted = false;
       const input = document.getElementById('searchInput');
       const clearBtn = document.getElementById('searchClearBtn');
 
+      // Typing drives the live suggestion dropdown (the input's inline
+      // oninput -> handleSearchInput); it must not also run the full search.
+      // Doing both hid the dropdown behind the results view after 300ms — the
+      // suggestions were fetched and rendered, then immediately covered — and
+      // doubled every catalogue request (anime, MovieBox and Hindi were each
+      // asked twice per keystroke). Enter and the search button run the search.
       input.addEventListener('input', (e) => {
         const q = e.target.value.trim();
         clearBtn.classList.toggle('active', q.length > 0);
-
         clearTimeout(searchTimeout);
-        if (!q) {
-          clearSearch();
-          return;
-        }
-
-        searchTimeout = setTimeout(() => executeSearch(q), 300);
+        if (!q) clearSearch();
       });
 
       input.addEventListener('keydown', (e) => {
@@ -10319,172 +8922,37 @@ let hindiAnimeCarouselStarted = false;
         .replace(/\s+/g, ' ');
     }
 
-    function dedupeCatalogs(hiResults, mbResults) {
-      const hiTitle = (r) => catalogBaseTitle((r.title && (r.title.english || r.title.romaji)) || r.title);
-      const mbTitle = (r) => catalogBaseTitle(r.title);
-
-      const mbKeys = new Set(mbResults.map(mbTitle).filter(Boolean));
-      const seenHi = new Set();
-      const hi = [];
-      for (const r of hiResults) {
-        const key = hiTitle(r);
-        if (!key || mbKeys.has(key) || seenHi.has(key)) continue;
-        seenHi.add(key);
-        hi.push(r);
-      }
-
-      // MovieBox entries are kept exactly as the catalog returns them: the
-      // rule is to prefer MovieBox over a HiAnime duplicate, not to collapse
-      // distinct MovieBox variants (e.g. separate audio editions).
-      return { hi, mb: mbResults };
-    }
+    // Search paints as soon as the HiAnime catalogue answers; it is the only
+    // catalogue left, so there is nothing to merge or append.
+    let searchToken = 0;
 
     async function executeSearch(query) {
       if (!query) return;
+      const token = ++searchToken;
+      const dView = document.getElementById('discoverView');
+      if (dView) dView.style.display = 'none';
+      const srb = document.getElementById('searchResultsBanner');
+      if (srb) srb.classList.add('active');
+      const srs = document.getElementById('searchResultsSection');
+      if (srs) srs.style.display = 'block';
+      const srt = document.getElementById('searchResultsTitle');
+      if (srt) srt.textContent = `Search results for "${query}"`;
+      const src = document.getElementById('searchResultsCount');
+      if (src) src.textContent = 'Searching…';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+
       try {
-        // Both catalogs are searched: HiAnime results render with the legacy
-        // cards, MovieBox results are appended (they open the MovieBox player).
-        const [hiRes, mbRes, indiaRes, renimeRes] = await Promise.all([
-          fetch(`/api/anime/search?q=${encodeURIComponent(query)}`).catch(() => null),
-          fetch(`/api/moviebox/search?q=${encodeURIComponent(query)}`).catch(() => null),
-          // The Hindi catalogue has its own search endpoint that the UI never
-          // called, so its 200+ titles were unsearchable despite being playable.
-          fetch(`/api/india/search?q=${encodeURIComponent(query)}`).catch(() => null),
-        ]);
+        const hiRes = await fetch(`/api/anime/search?q=${encodeURIComponent(query)}`, { signal: AbortSignal.timeout(15000) }).catch(() => null);
+        if (token !== searchToken) return;
         const hiData = hiRes && hiRes.ok ? await hiRes.json().catch(() => null) : null;
-        const mbData = mbRes && mbRes.ok ? await mbRes.json().catch(() => null) : null;
-        const indiaData = indiaRes && indiaRes.ok ? await indiaRes.json().catch(() => null) : null;
-        // Duplicates across catalogs collapse to the MovieBox entry only.
-        const { hi: hiResults, mb: mbResults } = dedupeCatalogs(
-          (hiData && hiData.results) || [],
-          (mbData && (mbData.items || mbData.results)) || []
-        );
-        // Hindi results are only appended when the other two catalogues do not
-        // already carry that title.
-        const alreadyShown = new Set(
-          [...hiResults, ...mbResults].map((item) =>
-            String(item.title?.english || item.title?.romaji || item.title || '').toLowerCase().trim()
-          )
-        );
-        const indiaResults = ((indiaData && indiaData.results) || []).filter((item) => {
-          const key = String(item.title || '').toLowerCase().trim();
-          return key && !alreadyShown.has(key);
-        });
-
-        const dView = document.getElementById('discoverView');
-        if (dView) dView.style.display = 'none';
-        const srb = document.getElementById('searchResultsBanner');
-        if (srb) srb.classList.add('active');
-        const srs = document.getElementById('searchResultsSection');
-        if (srs) srs.style.display = 'block';
-        const srt = document.getElementById('searchResultsTitle');
-        if (srt) srt.textContent = `Search results for "${query}"`;
-        const src = document.getElementById('searchResultsCount');
-        if (src) {
-          const found = hiResults.length + mbResults.length + indiaResults.length;
-          src.textContent = `Found ${found} titles`;
-        }
-
+        const hiResults = (hiData && hiData.results) || [];
         renderGrid('searchGrid', hiResults);
-        renderMovieboxResultsGrid(mbResults, 'More titles');
-        renderIndiaResultsGrid(indiaResults, 'Hindi catalogue');
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        if (src) src.textContent = hiResults.length
+          ? `Found ${hiResults.length} titles`
+          : 'No titles found';
       } catch (err) {
         console.error('Search request error:', err);
       }
-    }
-
-    // Displays a MovieBox results sub-section inside an existing grid.
-    function renderMovieboxResultsSectionHeader(label) {
-      return label;
-    }
-
-    // Hindi (animahd) search hits, rendered with the India card shape so each
-    // result opens the Hindi player rather than the HiAnime or MovieBox one.
-    // Hindi hits render in their own grid and open the India player, which
-    // resolves seasons/episodes/stream itself (ids are `moviebox:` / `goku:`).
-    function renderIndiaResultsGrid(list, label) {
-      const block = document.getElementById('searchHindiBlock');
-      const grid = document.getElementById('searchHindiGrid');
-      const heading = document.getElementById('searchHindiHeading');
-      if (!block || !grid) return;
-      if (!list || !list.length) {
-        block.style.display = 'none';
-        grid.innerHTML = '';
-        return;
-      }
-      if (heading) heading.textContent = `${label || 'Hindi catalogue'} (${list.length})`;
-      grid.innerHTML = list.map((item) => {
-        const title = item.title || 'Hindi title';
-        const cover = item.image || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
-        const kind = item.type === 'movie' ? 'movie' : 'series';
-        const idAttr = String(item.id || '').replace(/'/g, "\\'");
-        const rating = item.rating ? String(item.rating).replace(/^TMDB\s*/i, '').trim() : '';
-        return `
-          <div class="hianime-card" onclick="openIndiaDetail('${idAttr}', '${kind}', this.getAttribute('data-title'))" data-title="${escapeHtml(title)}">
-            <div class="hianime-poster-wrap">
-              <img src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
-              <div class="hianime-badges-over">
-                ${rating ? `<span class="badge-mic"><span>★ ${escapeHtml(rating)}</span></span>` : ''}
-              </div>
-            </div>
-            <div class="hianime-card-meta">
-              <h3 class="hianime-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
-              <div class="hianime-card-sub">
-                <span>${kind === 'movie' ? 'Movie' : 'Series'}</span>
-                <span class="hianime-dot">•</span><span>Hindi</span>
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-      block.style.display = 'block';
-    }
-
-    // MovieBox hits get their own grid. These cards must open the MovieBox
-    // detail/player by slug: rendering them through openPlayerById() resolved a
-    // HiAnime title that happened to share the numeric id, so clicking a
-    // MovieBox search result could play a completely different show.
-    function renderMovieboxResultsGrid(list, label) {
-      const block = document.getElementById('searchMovieboxBlock');
-      const grid = document.getElementById('searchMovieboxGrid');
-      const heading = document.getElementById('searchMovieboxHeading');
-      if (!block || !grid) return;
-      if (!list || !list.length) {
-        block.style.display = 'none';
-        grid.innerHTML = '';
-        return;
-      }
-      if (heading) heading.textContent = `${label || 'More titles'} (${list.length})`;
-      grid.innerHTML = list.map((item) => {
-        const title = item.title || 'Untitled';
-        const cover = item.image || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
-        const slug = String(item.slug || '').replace(/[^a-zA-Z0-9\-_/:.]/g, '');
-        const kind = item.type === 'movie' ? 'movie' : 'series';
-        const rating = item.rating ? String(item.rating) : '';
-        const year = item.year ? String(item.year) : '';
-        const click = slug
-          ? `onclick="openMovieboxDetail('${slug}', '${kind}', this.getAttribute('data-title'))"`
-          : '';
-        return `
-          <div class="hianime-card" ${click} data-title="${escapeHtml(title)}">
-            <div class="hianime-poster-wrap">
-              <img src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
-              <div class="hianime-badges-over">
-                ${rating ? `<span class="badge-mic"><span>★ ${escapeHtml(rating)}</span></span>` : ''}
-              </div>
-            </div>
-            <div class="hianime-card-meta">
-              <h3 class="hianime-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
-              <div class="hianime-card-sub">
-                <span>${kind === 'movie' ? 'Movie' : 'Series'}</span>
-                ${year ? `<span class="hianime-dot">•</span><span>${escapeHtml(year)}</span>` : ''}
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-      block.style.display = 'block';
     }
 
     function handleSearchSubmit(query) {
@@ -10674,19 +9142,12 @@ let hindiAnimeCarouselStarted = false;
 
       if (currentHianimeEpId) {
         loadHiAnimeStream(currentHianimeEpId, currentEpisode, currentAudio);
-      } else if (selectedAnime && selectedAnime.moviebox) {
-        // MovieBox streams are audio-native; reload through the MovieBox path
-        // so the selected option keeps the badge in sync with the chosen source.
-        loadMovieboxStream(selectedAnime, currentEpisode);
       } else if (selectedAnime) {
         loadEpisodeList(selectedAnime.id, currentEpisode);
         loadStream(selectedAnime.id, currentEpisode, currentAudio, currentSubLang);
       }
     }
 
-    // MovieBox playback is audio-native MP4 (no sub/dub toggle at source), so the
-    // in-page audio select is best-effort: MovieBox titles always reload through
-    // loadMovieboxStream regardless of the selected "audio" option.
     function syncAudioUI(quiet) {
       if (!quiet) {
         const value = currentAudio === 'dub' ? 'dub_en' : (currentSubLang === 'zh' ? 'sub_zh' : 'sub_ja');
@@ -10743,7 +9204,7 @@ let hindiAnimeCarouselStarted = false;
     // ==========================================
     // VIDEO PLAYER & EPISODES
     // ==========================================
-    function openPlayerById(id, ep = null) {
+    function openPlayerById(id, ep = null, source = '', sourceTitle = '') {
       const anime = (currentCatalog && currentCatalog.find(a => String(a.id) === String(id) || String(a.hianimeId) === String(id))) ||
                     (trendingCarouselData && trendingCarouselData.find(a => String(a.id) === String(id) || String(a.hianimeId) === String(id))) ||
                     (cachedHomeData?.spotlightAnimes && cachedHomeData.spotlightAnimes.find(a => String(a.id) === String(id) || String(a.hianimeId) === String(id))) ||
@@ -10760,13 +9221,21 @@ let hindiAnimeCarouselStarted = false;
         // HiAnime/AniList titles are resolved through the details API. The ad is
         // armed here, while the click's gesture is still live: by the time the
         // fetch resolves the browser refuses a popup, so firing it inside
-        // openPlayer() would only ever hit the invisible fallback. The 5th
-        // argument tells openPlayer the ad was already handled.
-        fireOwnerAd('ep:' + id + ':' + targetEp);
-        fetch(`/api/anime/details?id=${id}`)
+        // openPlayer() would only ever hit the invisible fallback. skipAd then
+        // tells openPlayer not to fire a second key for this same episode —
+        // but the stream must still load, which is what skipAutoStream=false
+        // keeps doing (sharing one flag for both is what broke playback here).
+        fireOwnerAd('ep:' + id + ':' + targetEp, { kind: 'ep', id: String(id), ep: targetEp, source: source || '', title: sourceTitle || '' });
+        // `source`/`title` ride along because a live-HiAnime search row's id is a
+        // HiAnime id, not an AniList one: the details route must not guess, and
+        // it needs the title the result card already shows.
+        const detailsUrl = `/api/anime/details?id=${encodeURIComponent(id)}`
+          + (source ? `&source=${encodeURIComponent(source)}` : '')
+          + (sourceTitle ? `&title=${encodeURIComponent(sourceTitle)}` : '');
+        fetch(detailsUrl)
           .then(r => r.json())
           .then(data => {
-            if (data.anime) openPlayer(data.anime, targetEp, null, resumeTime, true);
+            if (data.anime) openPlayer(data.anime, targetEp, null, resumeTime, false, true);
           })
           .catch(() => {});
       }
@@ -10775,22 +9244,45 @@ let hindiAnimeCarouselStarted = false;
     // Advanced-filter results, search suggestions and the catalog grid all call
     // this. It was never defined, so every one of those clicks threw a
     // ReferenceError and no title could ever be opened from those lists.
-    function openPlayerForAnimeById(id, ep = null) {
-      openPlayerById(id, ep);
+    function openPlayerForAnimeById(id, ep = null, source = '', sourceTitle = '') {
+      openPlayerById(id, ep, source, sourceTitle);
     }
 
     let currentEpisodeList = [];
     let activeRangeStart = 1;
     const RANGE_SIZE = 100;
 
-    function openPlayer(anime, ep = 1, hianimeEpId = null, resumeTimestamp = null, skipAutoStream = false) {
+    // What is needed to reopen this exact title after the sponsored page, per
+    // provider: an AniList/HiAnime id resolves again through /api/anime/details,
+    // a MovieBox title needs its slug (its `mb-` id exists nowhere the restore
+    // could look it up), and Hindi carries its own episode id. Passing it
+    // explicitly is what keeps the return from guessing the wrong source.
+    function titleOfAnime(anime) {
+      const t = anime && anime.title;
+      if (typeof t === 'string') return t;
+      return (t && (t.english || t.romaji)) || (anime && anime.titleStr) || '';
+    }
+    function adReturnContextFor(anime, ep) {
+      if (!anime) return null;
+      const n = parseInt(ep, 10) || 1;
+      const id = anime.id || anime.hianimeId;
+      if (!id) return null;
+      return { kind: 'ep', id: String(id), ep: n, source: anime.source || '', title: titleOfAnime(anime) };
+    }
+
+    function openPlayer(anime, ep = 1, hianimeEpId = null, resumeTimestamp = null, skipAutoStream = false, skipAd = false) {
       stopHeroAutoplay();
       // Owner ad: one popup per episode opened, never again for the same one.
-      // skipAutoStream marks an internal hand-off — the India player already
-      // fired its own key just before calling in here — so a single click can
-      // never fire twice.
-      if (!skipAutoStream) {
-        fireOwnerAd('ep:' + ((anime && (anime.id || anime.hianimeId || anime.malId)) || 'unknown') + ':' + ep);
+      // The two flags are deliberately separate. `skipAutoStream` means the
+      // caller already resolved the playable URL (the India flow) and a second
+      // resolution would hide the <video> that is about to play it. `skipAd`
+      // means the caller fired this episode's key while the click's gesture was
+      // still live (the details fetch in openPlayerById — by the time it
+      // resolves the browser refuses a popup). Collapsing both into one flag is
+      // what left details-resolved titles with no stream at all: the ad had
+      // been handled, so the stream was skipped with it.
+      if (!skipAd) {
+        fireOwnerAd('ep:' + ((anime && (anime.id || anime.hianimeId || anime.malId)) || 'unknown') + ':' + ep, adReturnContextFor(anime, ep));
       }
       selectedAnime = anime;
       currentEpisode = ep;
@@ -10913,17 +9405,6 @@ let hindiAnimeCarouselStarted = false;
     }
 
     async function loadEpisodeList(animeId, activeEp) {
-      // India titles carry their own option list (quality/mirror/batch files).
-      if (selectedAnime && selectedAnime.indiaEpisodes && String(selectedAnime.id) === String(animeId)) {
-        currentEpisodeList = selectedAnime.indiaEpisodes;
-        renderEpisodeGrid(currentEpisodeList.length, activeEp, currentEpisodeList);
-        return;
-      }
-      // MovieBox episode grid comes from detail.seasons — no HiAnime list.
-      if (selectedAnime && selectedAnime.moviebox && String(selectedAnime.id) === String(animeId)) {
-        renderEpisodeGrid(selectedAnime.episodes || 1, activeEp, null);
-        return;
-      }
       try {
         const res = await fetch(`/api/anime/episodes?id=${animeId}`);
         const data = await res.json();
@@ -11074,7 +9555,7 @@ let hindiAnimeCarouselStarted = false;
           grid.innerHTML = json.cast.map(c => `
             <div class="cast-card">
               <div class="cast-img-wrapper">
-                <img src="${c.image}" alt="${escapeHtml(c.name)}" loading="lazy" onerror="this.src='https://s4.anilist.co/file/anilistcdn/character/large/default.jpg'"/>
+                <img src="${c.image}" alt="${escapeHtml(c.name)}" loading="lazy" decoding="async" onerror="this.src='https://s4.anilist.co/file/anilistcdn/character/large/default.jpg'"/>
               </div>
               <div class="cast-body">
                 <span class="cast-char-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
@@ -11095,15 +9576,15 @@ let hindiAnimeCarouselStarted = false;
       const countEl = document.getElementById('playerCommentCount');
       if (!listEl) return;
       try {
-        const res = await fetch(`/api/moviebox/comments?animeId=${encodeURIComponent(animeId)}`);
+        const res = await fetch(`/api/anime/comments?animeId=${encodeURIComponent(animeId)}`);
         const json = await res.json();
-        if (json && json.comments) {
-          if (countEl) countEl.textContent = json.comments.length;
-          if (json.comments.length === 0) {
-            listEl.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; padding: 16px 0; text-align: center;">No discussions yet — be the first to post below.</div>';
-            return;
-          }
-          listEl.innerHTML = json.comments.map(c => `
+        const comments = (json && json.comments) || [];
+        if (countEl) countEl.textContent = comments.length;
+        if (comments.length === 0) {
+          listEl.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; padding: 16px 0; text-align: center;">No discussions yet — be the first to post below.</div>';
+          return;
+        }
+        listEl.innerHTML = comments.map(c => `
             <div class="comment-item">
               <img class="comment-avatar" src="${c.avatar || 'https://api.dicebear.com/7.x/bottts/svg?seed=otaku'}" alt="${escapeHtml(c.author)}"/>
               <div class="comment-content">
@@ -11120,7 +9601,6 @@ let hindiAnimeCarouselStarted = false;
               </div>
             </div>
           `).join('');
-        }
       } catch (e) {
         listEl.innerHTML = '<div style="color: var(--text-muted); font-size: 13px;">Failed to load discussions.</div>';
       }
@@ -11136,7 +9616,7 @@ let hindiAnimeCarouselStarted = false;
         return;
       }
       try {
-        const res = await fetch('/api/moviebox/comments', {
+        const res = await fetch('/api/anime/comments', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -11207,7 +9687,7 @@ let hindiAnimeCarouselStarted = false;
       }
       grid.innerHTML = list.map(item => `
         <div class="schedule-card" onclick="closeScheduleModal(); openPlayerModalWithAnimeId(${item.id})">
-          <img class="schedule-poster" src="${item.coverImage?.large || item.coverImage?.extraLarge || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/default.jpg'}" alt="${escapeHtml(item.title?.english || item.title?.romaji || 'Anime')}" loading="lazy"/>
+          <img class="schedule-poster" src="${item.coverImage?.large || item.coverImage?.extraLarge || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/default.jpg'}" alt="${escapeHtml(item.title?.english || item.title?.romaji || 'Anime')}" loading="lazy" decoding="async"/>
           <div style="display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0;">
             <span class="schedule-time-badge">⏰ ${item.airingTime || '18:00 JST'}</span>
             <span style="font-size: 13px; font-weight: 700; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
@@ -11430,29 +9910,27 @@ let hindiAnimeCarouselStarted = false;
     }
 
     function selectEpisode(ep) {
+      // Owner-uploaded Mux titles: each episode is its own embed, so switching
+      // is a new iframe — no provider resolution, no HiAnime episode id.
+      const muxOptions = selectedAnime && selectedAnime.muxEpisodes;
+      if (Array.isArray(muxOptions) && muxOptions.length && ep >= 1 && ep <= muxOptions.length) {
+        const target = muxOptions[ep - 1];
+        currentEpisode = ep;
+        currentHianimeEpId = null;
+        const badge = document.getElementById('modalEpBadge');
+        if (badge && target.title) badge.textContent = target.title;
+        currentStreams = [{ server: 'Mux', embedUrl: target.muxEmbed, type: 'embed' }];
+        updateServerDropdown(currentStreams);
+        playStream(currentStreams[0]);
+        renderEpisodeGrid(muxOptions.length, ep, muxOptions);
+        return;
+      }
+
       if (!selectedAnime || (ep === currentEpisode && !currentHianimeEpId)) return;
 
       // India titles: every entry is one quality/mirror option of the same
       // whole-season file, so re-resolve through the India API instead of the
       // HiAnime episode pipeline (which has no id of this shape).
-      const indiaOptions = selectedAnime.indiaEpisodes;
-      if (Array.isArray(indiaOptions) && indiaOptions.length && ep >= 1 && ep <= indiaOptions.length) {
-        const target = indiaOptions[ep - 1];
-        const indiaVideo = document.getElementById('videoNative');
-        if (indiaVideo && indiaVideo.currentTime > 5) {
-          saveAnimeProgress(selectedAnime.id, {
-            episode: currentEpisode,
-            time: indiaVideo.currentTime,
-            duration: indiaVideo.duration || 0,
-            audio: currentAudio
-          });
-        }
-        const indiaTitle = selectedAnime.title?.english ||
-          (typeof selectedAnime.title === 'string' ? selectedAnime.title : 'Hindi Title');
-        openIndiaStream({ episodeId: target.episodeId }, indiaTitle, indiaOptions, ep);
-        return;
-      }
-
       // Save progress of previous episode before switching
       const video = document.getElementById('videoNative');
       if (video && selectedAnime && video.currentTime > 5) {
@@ -11466,6 +9944,10 @@ let hindiAnimeCarouselStarted = false;
 
       currentEpisode = ep;
       currentHianimeEpId = null;
+      // Owner ad: switching episodes plays a *new* episode, so it earns its own
+      // one-shot key (same key format openPlayer uses — the store makes a
+      // repeat selection of this episode a no-op).
+      fireOwnerAd('ep:' + ((selectedAnime && (selectedAnime.id || selectedAnime.hianimeId || selectedAnime.malId)) || 'unknown') + ':' + ep, adReturnContextFor(selectedAnime, ep));
       const elEpBadge = document.getElementById('modalEpBadge');
       if (elEpBadge) elEpBadge.textContent = `Episode ${ep}`;
 
@@ -11770,10 +10252,6 @@ let hindiAnimeCarouselStarted = false;
     // STREAM RESOLUTION & PLAYBACK
     // ==========================================
     async function loadStream(animeId, episode, audio = currentAudio, lang = currentSubLang, preResolvedUrl = null) {
-      // MovieBox titles resolve through their own endpoint (MP4 relay).
-      if (selectedAnime && selectedAnime.moviebox && String(selectedAnime.id) === String(animeId)) {
-        return loadMovieboxStream(selectedAnime, episode);
-      }
       const loader = document.getElementById('playerLoader');
       const loaderText = document.getElementById('playerLoaderText');
       const iframe = document.getElementById('videoIframe');
@@ -12017,6 +10495,7 @@ let hindiAnimeCarouselStarted = false;
       }
     }
 
+    
     function playEmbed(url) {
       disarmStallWatchdog();
       const loader = document.getElementById('playerLoader');
@@ -12073,7 +10552,7 @@ let hindiAnimeCarouselStarted = false;
       }
     }
 
-    function playHls(m3u8Url, subtitles = [], streamType = '') {
+    async function playHls(m3u8Url, subtitles = [], streamType = '') {
       disarmStallWatchdog();
       const loader = document.getElementById('playerLoader');
       const iframe = document.getElementById('videoIframe');
@@ -12176,13 +10655,43 @@ let hindiAnimeCarouselStarted = false;
       const isProgressiveMp4 = !isHlsSrc && (streamType === 'mp4' || /\.mp4(\?|&|$)/i.test(decodedSrc));
       if (isProgressiveMp4) {
         if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
-        loader.style.display = 'none';
+        // The loader stays up (it carries the running Pikachu) until the first
+        // frame is decodable. Hiding it here left a black rectangle for the
+        // whole cold-start range request, which is the longest wait of all.
+        const revealFrame = () => { loader.style.display = 'none'; };
+        video.addEventListener('loadeddata', revealFrame, { once: true });
+        video.addEventListener('canplay', revealFrame, { once: true });
         // `preload:auto` + load() gets the browser fetching ahead of the
         // playhead immediately, so seeking and startup do not stall.
         video.preload = 'auto';
         video.src = m3u8Url;
         video.load();
         video.play().catch(() => { playOverlay.style.display = 'flex'; });
+        // Nothing used to recover an MP4 mirror that never delivers a frame:
+        // the Pikachu spun indefinitely. Give the first frame 20s, then hop to
+        // the next mirror; once playing, the ordinary stall watchdog takes over
+        // (it was only ever armed for HLS, so a mid-episode starve on MP4 also
+        // hung forever).
+        const startupGuard = setTimeout(() => {
+          if (video.readyState < 3) {
+            console.warn('MP4 source produced no frame in 20s — failing over');
+            playerFailover('This server is not responding — trying the next mirror...');
+          }
+        }, 20000);
+        video.addEventListener('playing', () => clearTimeout(startupGuard), { once: true });
+        armStallWatchdog(video);
+        return;
+      }
+
+      // hls.js is fetched here, on the first HLS stream, not on page load.
+      // A viewer whose mirror is plain MP4 has already returned above without
+      // downloading it; a blocked or offline CDN fails into the next mirror
+      // instead of throwing on an undefined global.
+      try {
+        await ensureHls();
+      } catch (e) {
+        loader.style.display = 'none';
+        playerFailover('The stream engine could not load — trying the next mirror...');
         return;
       }
 
@@ -12198,6 +10707,10 @@ let hindiAnimeCarouselStarted = false;
         hlsInstance = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
+          // Never pull a 1080p rendition for a 640px-wide viewport: on a thin
+          // link that is the difference between a steady stream and a loop of
+          // stalls. ABR still steps up when the player is large enough.
+          capLevelToPlayerSize: true,
           maxBufferLength: 90,
           maxMaxBufferLength: 600,
           maxBufferSize: 90 * 1000 * 1000,
@@ -12214,7 +10727,13 @@ let hindiAnimeCarouselStarted = false;
         hlsInstance.loadSource(m3u8Url);
         hlsInstance.attachMedia(video);
         hlsInstance.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-          loader.style.display = 'none';
+          // Do not hide the loader yet: the manifest is a text file, the first
+          // media fragment is what the viewer is actually waiting for. `canplay`
+          // rather than `playing` so a blocked autoplay still reveals the
+          // click-to-play overlay underneath it.
+          const revealLoader = () => { loader.style.display = 'none'; };
+          video.addEventListener('canplay', revealLoader, { once: true });
+          video.addEventListener('playing', revealLoader, { once: true });
           applyPendingResume(video);
           // hls.js can add manifest subtitle tracks after attach — re-assert
           // English-only display.
@@ -12222,6 +10741,7 @@ let hindiAnimeCarouselStarted = false;
           updateQualityDropdown(hlsInstance.levels || data?.levels || []);
           video.play().catch(err => {
             console.log('Autoplay deferred, showing play overlay');
+            loader.style.display = 'none';
             playOverlay.style.display = 'flex';
           });
         });
@@ -12390,7 +10910,7 @@ let hindiAnimeCarouselStarted = false;
       grid.innerHTML = list.map(item => `
         <div class="anime-card" onclick="inspectHiAnimeAnime('${item.id}', '${escapeHtml(item.title)}', '${item.poster}', '${item.url}')">
           <div class="card-poster">
-            <img src="${item.poster}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(item.title)}" loading="lazy"/>
+            <img src="${item.poster}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async"/>
             <div class="card-overlay"></div>
             <div class="card-badge-top" style="color: #ffbade;">Anime #${item.id}</div>
             <div class="card-play-hover">
@@ -13404,11 +11924,15 @@ let hindiAnimeCarouselStarted = false;
     function showOwnerReportsView() {
       document.getElementById('ownerLoginView').style.display = 'none';
       document.getElementById('ownerReportsView').style.display = 'block';
-      // Logging in while the Notice Board tab is showing must populate that
-      // pane too — otherwise it stays empty until the tab is re-selected.
+      // Logging in while the Notice Board or Content tab is showing must
+      // populate that pane too — otherwise it stays empty until re-selected.
       const noticesTab = document.getElementById('ownerTabNotices');
       if (noticesTab && noticesTab.classList.contains('active') && ownerPortalToken) {
         loadOwnerNotices();
+      }
+      const contentTab = document.getElementById('ownerTabContent');
+      if (contentTab && contentTab.classList.contains('active') && ownerPortalToken) {
+        loadOwnerMuxContent();
       }
     }
 
@@ -13496,16 +12020,18 @@ let hindiAnimeCarouselStarted = false;
     let ownerNotices = [];
 
     function switchOwnerTab(tab) {
-      const isNotices = tab === 'notices';
-      const reportsPane = document.getElementById('ownerReportsPane');
-      const noticesPane = document.getElementById('ownerNoticesPane');
-      if (reportsPane) reportsPane.style.display = isNotices ? 'none' : 'block';
-      if (noticesPane) noticesPane.style.display = isNotices ? 'block' : 'none';
-      const rTab = document.getElementById('ownerTabReports');
-      const nTab = document.getElementById('ownerTabNotices');
-      if (rTab) rTab.classList.toggle('active', !isNotices);
-      if (nTab) nTab.classList.toggle('active', isNotices);
-      if (isNotices) loadOwnerNotices();
+      const panes = {
+        reports: document.getElementById('ownerReportsPane'),
+        notices: document.getElementById('ownerNoticesPane'),
+        content: document.getElementById('ownerContentPane'),
+      };
+      for (const [key, pane] of Object.entries(panes)) {
+        if (pane) pane.style.display = key === tab ? 'block' : 'none';
+        const btn = document.getElementById('ownerTab' + key.charAt(0).toUpperCase() + key.slice(1));
+        if (btn) btn.classList.toggle('active', key === tab);
+      }
+      if (tab === 'notices') loadOwnerNotices();
+      if (tab === 'content') loadOwnerMuxContent();
     }
 
     async function loadOwnerNotices() {
@@ -13611,10 +12137,195 @@ let hindiAnimeCarouselStarted = false;
       } catch (e) {}
     }
 
+    // ---- Owner Portal: Mux content management ----
+    let muxEditId = null;
+
+    function addMuxEpisodeRow(ep = 1, title = '', embed = '') {
+      const rows = document.getElementById('muxEpisodeRows');
+      if (!rows) return;
+      const row = document.createElement('div');
+      row.className = 'mux-ep-row';
+      row.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;';
+      row.innerHTML = `
+        <input type="number" class="feedback-input mux-ep-num" min="1" value="${Number(ep) || rows.children.length + 1}" placeholder="Ep #" style="flex:0 1 74px;"/>
+        <input type="text" class="feedback-input mux-ep-title" maxlength="200" placeholder="Episode title (optional)" value="${escapeHtml(title).replace(/"/g, '&quot;')}" style="flex:1;min-width:140px;"/>
+        <input type="text" class="feedback-input mux-ep-embed" maxlength="600" placeholder="Mux playback ID or player.mux.com URL" value="${escapeHtml(embed).replace(/"/g, '&quot;')}" style="flex:2;min-width:200px;"/>
+        <button class="btn-secondary" style="padding:6px 10px;font-size:12px;" onclick="this.closest('.mux-ep-row').remove()" title="Remove episode">✕</button>
+      `;
+      rows.appendChild(row);
+    }
+
+    function resetMuxForm() {
+      muxEditId = null;
+      for (const id of ['muxTitleInput', 'muxImageInput', 'muxYearInput', 'muxGenreInput', 'muxDescInput']) {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+      }
+      const typeEl = document.getElementById('muxTypeInput');
+      if (typeEl) typeEl.value = 'series';
+      const rows = document.getElementById('muxEpisodeRows');
+      if (rows) rows.innerHTML = '';
+      addMuxEpisodeRow(1);
+      const err = document.getElementById('muxContentError');
+      if (err) { err.textContent = ''; err.style.display = 'none'; }
+      const status = document.getElementById('muxContentStatus');
+      if (status) status.textContent = '';
+      const saveBtn = document.getElementById('muxSaveBtn');
+      if (saveBtn) saveBtn.textContent = 'Publish';
+      const cancelBtn = document.getElementById('muxCancelEditBtn');
+      if (cancelBtn) cancelBtn.style.display = 'none';
+    }
+
+    async function saveMuxContent() {
+      const err = document.getElementById('muxContentError');
+      const status = document.getElementById('muxContentStatus');
+      const btn = document.getElementById('muxSaveBtn');
+      const title = (document.getElementById('muxTitleInput')?.value || '').trim();
+      const setError = (msg) => {
+        if (!err) return;
+        err.textContent = msg;
+        err.style.display = msg ? 'block' : 'none';
+      };
+      setError('');
+      if (!ownerPortalToken) { showOwnerLoginView(); return; }
+      if (!title) { setError('A title is required.'); return; }
+
+      const episodes = [];
+      document.querySelectorAll('#muxEpisodeRows .mux-ep-row').forEach((row) => {
+        const ep = parseInt(row.querySelector('.mux-ep-num')?.value, 10);
+        const epTitle = (row.querySelector('.mux-ep-title')?.value || '').trim();
+        const embed = (row.querySelector('.mux-ep-embed')?.value || '').trim();
+        if (embed) episodes.push({ ep: Number.isFinite(ep) && ep > 0 ? ep : episodes.length + 1, title: epTitle, embed });
+      });
+      if (!episodes.length) { setError('Add at least one Mux playback ID or embed URL.'); return; }
+
+      if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+      try {
+        const res = await fetch('/api/mux/content', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ownerPortalToken },
+          body: JSON.stringify({
+            id: muxEditId || undefined,
+            title,
+            type: document.getElementById('muxTypeInput')?.value === 'movie' ? 'movie' : 'series',
+            image: (document.getElementById('muxImageInput')?.value || '').trim(),
+            year: (document.getElementById('muxYearInput')?.value || '').trim(),
+            genre: (document.getElementById('muxGenreInput')?.value || '').trim(),
+            description: (document.getElementById('muxDescInput')?.value || '').trim(),
+            episodes,
+          })
+        });
+        if (res.status === 401) { lockOwnerPortal(); showOwnerLoginView(); return; }
+        const json = await res.json();
+        if (!json.success) {
+          setError(json.error || 'Could not save this title.');
+          return;
+        }
+        if (status) status.textContent = 'Published — live on the home page.';
+        resetMuxForm();
+        loadOwnerMuxContent();
+        // Refresh the public row if it is already on screen.
+        muxSectionStarted = false;
+        initMuxSection();
+      } catch (e) {
+        setError('Network error — please try again.');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Publish'; }
+      }
+    }
+
+    async function loadOwnerMuxContent() {
+      const list = document.getElementById('muxContentList');
+      const count = document.getElementById('muxContentCount');
+      if (!list) return;
+      if (!ownerPortalToken) { showOwnerLoginView(); return; }
+
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px;">Loading titles…</div>';
+      try {
+        const res = await fetch('/api/mux/content', { cache: 'no-store' });
+        const json = await res.json();
+        const items = (json && json.success && Array.isArray(json.items)) ? json.items : [];
+        if (count) count.textContent = items.length + ' title' + (items.length === 1 ? '' : 's') + ' published';
+        if (!items.length) {
+          list.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:20px 0;text-align:center;">Nothing published yet — add your first series or movie above.</div>';
+          return;
+        }
+        list.innerHTML = items.map((it) => `
+          <div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:10px;padding:12px;">
+            <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+              <strong style="font-size:13px;color:var(--text);">${escapeHtml(it.title)}</strong>
+              <span style="font-size:11px;color:var(--text-faint);">${escapeHtml(it.type === 'movie' ? 'Movie' : 'Series')} · ${(it.episodes || []).length} ep${it.episodes && it.episodes.length === 1 ? '' : 's'}</span>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn-secondary" style="padding:6px 12px;font-size:12px;" onclick="editMuxContent('${escapeHtml(it.id)}')">Edit</button>
+              <button class="btn-secondary" style="padding:6px 12px;font-size:12px;color:#ff6b6b;" onclick="deleteMuxContent('${escapeHtml(it.id)}')">Delete</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {
+        list.innerHTML = '<div style="color:#ff6b6b;font-size:13px;">Network error.</div>';
+      }
+    }
+
+    async function editMuxContent(id) {
+      try {
+        const res = await fetch('/api/mux/content', { cache: 'no-store' });
+        const json = await res.json();
+        const item = ((json && json.items) || []).find((it) => it && it.id === id);
+        if (!item) return;
+        muxEditId = item.id;
+        const set = (fieldId, value) => { const el = document.getElementById(fieldId); if (el) el.value = value || ''; };
+        set('muxTitleInput', item.title);
+        set('muxImageInput', item.image);
+        set('muxYearInput', item.year);
+        set('muxGenreInput', item.genre);
+        set('muxDescInput', item.description);
+        const typeEl = document.getElementById('muxTypeInput');
+        if (typeEl) typeEl.value = item.type === 'movie' ? 'movie' : 'series';
+        const rows = document.getElementById('muxEpisodeRows');
+        if (rows) rows.innerHTML = '';
+        (item.episodes || []).forEach((ep) => addMuxEpisodeRow(ep.ep, ep.title, ep.embedUrl));
+        if (!rows || !rows.children.length) addMuxEpisodeRow(1);
+        const saveBtn = document.getElementById('muxSaveBtn');
+        if (saveBtn) saveBtn.textContent = 'Save Changes';
+        const cancelBtn = document.getElementById('muxCancelEditBtn');
+        if (cancelBtn) cancelBtn.style.display = 'inline-block';
+        const status = document.getElementById('muxContentStatus');
+        if (status) status.textContent = 'Editing “' + item.title + '”';
+        const pane = document.getElementById('ownerContentPane');
+        if (pane) pane.scrollTop = 0;
+      } catch (e) {}
+    }
+
+    async function deleteMuxContent(id) {
+      if (!id || !ownerPortalToken) return;
+      if (!window.confirm('Remove this title from the site?')) return;
+      try {
+        const res = await fetch('/api/mux/content?id=' + encodeURIComponent(id), {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer ' + ownerPortalToken }
+        });
+        if (res.status === 401) { lockOwnerPortal(); showOwnerLoginView(); return; }
+        const json = await res.json();
+        if (json.success) {
+          if (muxEditId === id) resetMuxForm();
+          loadOwnerMuxContent();
+          muxSectionStarted = false;
+          initMuxSection();
+        }
+      } catch (e) {}
+    }
+
     window.switchOwnerTab = switchOwnerTab;
     window.loadOwnerNotices = loadOwnerNotices;
     window.postOwnerNotice = postOwnerNotice;
     window.deleteOwnerNotice = deleteOwnerNotice;
+    window.addMuxEpisodeRow = addMuxEpisodeRow;
+    window.saveMuxContent = saveMuxContent;
+    window.loadOwnerMuxContent = loadOwnerMuxContent;
+    window.editMuxContent = editMuxContent;
+    window.deleteMuxContent = deleteMuxContent;
+    window.resetMuxForm = resetMuxForm;
 
     window.openOwnerPortal = openOwnerPortal;
     window.closeOwnerPortal = closeOwnerPortal;
@@ -13810,6 +12521,7 @@ let hindiAnimeCarouselStarted = false;
         <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;">
           <button class="owner-tab-btn active" id="ownerTabReports" onclick="switchOwnerTab('reports')">Reports</button>
           <button class="owner-tab-btn" id="ownerTabNotices" onclick="switchOwnerTab('notices')">Notice Board</button>
+          <button class="owner-tab-btn" id="ownerTabContent" onclick="switchOwnerTab('content')">Upload Content</button>
         </div>
 
         <div id="ownerReportsPane">
@@ -13837,6 +12549,41 @@ let hindiAnimeCarouselStarted = false;
             <button class="btn-secondary" style="padding:6px 12px;font-size:12px;" onclick="loadOwnerNotices()">Refresh</button>
           </div>
           <div id="ownerNoticesList" style="max-height:42vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px;"></div>
+        </div>
+
+        <div id="ownerContentPane" style="display:none;">
+          <div style="background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px;text-align:left;">
+            <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:10px;">Add a series or movie (Mux embed)</div>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;line-height:1.5;">Paste the Mux <strong>playback ID</strong> (e.g. <code>AbC123xyz</code>) or the full <code>https://player.mux.com/…</code> URL for each episode. No Mux account or API key is needed on this site — the public Mux player does the streaming inside our own player.</p>
+            <input type="text" id="muxTitleInput" class="feedback-input" maxlength="200" placeholder="Title (e.g. Attack on Titan Hindi)" style="width:100%;margin-bottom:8px;"/>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+              <select id="muxTypeInput" class="feedback-input" style="flex:0 1 130px;">
+                <option value="series">Series</option>
+                <option value="movie">Movie</option>
+              </select>
+              <input type="text" id="muxImageInput" class="feedback-input" maxlength="600" placeholder="Poster image URL" style="flex:1;min-width:180px;"/>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+              <input type="text" id="muxYearInput" class="feedback-input" maxlength="10" placeholder="Year (optional)" style="flex:0 1 120px;"/>
+              <input type="text" id="muxGenreInput" class="feedback-input" maxlength="80" placeholder="Genre (optional)" style="flex:1;min-width:140px;"/>
+            </div>
+            <textarea id="muxDescInput" class="feedback-input" maxlength="2000" rows="2" placeholder="Description (optional)" style="width:100%;resize:vertical;margin-bottom:8px;"></textarea>
+            <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.6px;margin:12px 0 8px;">Episodes</div>
+            <div id="muxEpisodeRows" style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px;"></div>
+            <button class="btn-secondary" style="padding:7px 14px;font-size:12px;" onclick="addMuxEpisodeRow()">+ Add Episode</button>
+            <div id="muxContentError" style="color:#ff6b6b;font-size:12px;margin-top:8px;display:none;"></div>
+            <div style="display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap;">
+              <button class="btn-play" style="padding:9px 18px;font-size:13px;" id="muxSaveBtn" onclick="saveMuxContent()">Publish</button>
+              <button class="btn-secondary" style="padding:9px 14px;font-size:12px;display:none;" id="muxCancelEditBtn" onclick="resetMuxForm()">Cancel Edit</button>
+              <span id="muxContentStatus" style="font-size:12px;color:var(--text-muted);"></span>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+            <span id="muxContentCount" style="font-size:13px;color:var(--text-muted);"></span>
+            <button class="btn-secondary" style="padding:6px 12px;font-size:12px;" onclick="loadOwnerMuxContent()">Refresh</button>
+          </div>
+          <div id="muxContentList" style="max-height:38vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px;"></div>
         </div>
       </div>
     </div>
@@ -14198,7 +12945,7 @@ let hindiAnimeCarouselStarted = false;
       return `
         <div class="category-slide-card" onclick="openMangaDetail('${slug}')" data-title="${escapeHtml(title)}">
           <div class="slide-poster-wrap">
-            <img class="slide-poster-img" src="${mangaImg(item.poster)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+            <img class="slide-poster-img" src="${mangaImg(item.poster)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
             <div class="slide-overlay"></div>
             <span class="trending-rank-badge">${rankStr}</span>
             ${pill ? `<span class="trending-score-pill">${escapeHtml(pill)}</span>` : ''}
@@ -14577,7 +13324,7 @@ let hindiAnimeCarouselStarted = false;
       return `
         <div class="manga-grid-card" onclick="openMangaDetail('${slug}')" data-title="${escapeHtml(title)}">
           <div class="manga-grid-poster">
-            <img src="${mangaImg(item.poster)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+            <img src="${mangaImg(item.poster)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy" decoding="async"/>
           </div>
           <div class="manga-grid-title">${escapeHtml(title)}</div>
           ${chapter ? `<div class="manga-grid-chapter">${escapeHtml(chapter)}</div>` : ''}
@@ -14746,6 +13493,7 @@ let hindiAnimeCarouselStarted = false;
 
     // LIVE SEARCH SUGGESTIONS
     let searchDebounceTimer = null;
+    let suggestionToken = 0;
     function handleSearchInput(query) {
       clearTimeout(searchDebounceTimer);
       const dropdown = document.getElementById('searchSuggestionsDropdown');
@@ -14757,38 +13505,21 @@ let hindiAnimeCarouselStarted = false;
       }
 
       searchDebounceTimer = setTimeout(async () => {
+        const token = ++suggestionToken;
         try {
-          // Suggestions come from all catalogs: HiAnime/9Anime, MovieBox, and Hindi Anime
-          const [hiRes, mbRes, indiaRes] = await Promise.all([
-            fetch(`/api/anime/search?q=${encodeURIComponent(q)}`).catch(() => null),
-            fetch(`/api/moviebox/search?q=${encodeURIComponent(q)}`).catch(() => null),
-            fetch(`/api/india/search?q=${encodeURIComponent(q)}`).catch(() => null),
-          ]);
+          const hiRes = await fetch(`/api/anime/search?q=${encodeURIComponent(q)}`, { signal: AbortSignal.timeout(15000) }).catch(() => null);
+          if (token !== suggestionToken) return;
           const hiData = hiRes && hiRes.ok ? await hiRes.json().catch(() => null) : null;
-          const mbData = mbRes && mbRes.ok ? await mbRes.json().catch(() => null) : null;
-          const indiaData = indiaRes && indiaRes.ok ? await indiaRes.json().catch(() => null) : null;
-          const merged = dedupeCatalogs(
-            (hiData && hiData.results) || [],
-            (mbData && (mbData.items || mbData.results)) || []
-          );
-          const hiItems = merged.hi.slice(0, 3);
-          const mbItems = merged.mb.slice(0, 3);
-          const indiaItems = ((indiaData && indiaData.results) || []).slice(0, 3);
-
-          if (hiItems.length === 0 && mbItems.length === 0 && indiaItems.length === 0) {
-            dropdown.innerHTML = `<div style="padding: 12px; font-size: 12px; color: #9ca3af; text-align: center;">No anime found for "${escapeHtml(q)}"</div>`;
-            dropdown.style.display = 'block';
-            return;
-          }
-
-          let html = '';
+          const hiResults = (hiData && hiData.results) || [];
+          const hiItems = hiResults.slice(0, 3);
           hiItems.forEach(anime => {
+            seenTitles.add(normTitle(anime.title?.english || anime.title?.romaji || anime.title));
             const title = anime.title?.english || anime.title?.romaji || anime.title;
             const poster = anime.coverImage?.large || anime.coverImage?.extraLarge || anime.poster || '';
             const epCount = anime.episodes || anime.totalEpisodes || '?';
             const year = anime.seasonYear || anime.year || '2024';
             html += `
-              <div class="suggestion-item" onclick="openPlayerForAnimeById('${anime.id}')">
+              <div class="suggestion-item" data-anime-id="${escapeHtml(String(anime.id))}" data-anime-source="${escapeHtml(anime.source || '')}" data-anime-title="${escapeHtml(title)}" onclick="openPlayerForAnimeById(this.dataset.animeId, null, this.dataset.animeSource, this.dataset.animeTitle)">
                 <img src="${poster}" class="suggestion-thumb" alt="${escapeHtml(title)}" onerror="handleImgError(this)"/>
                 <div class="suggestion-info">
                   <div class="suggestion-title">${escapeHtml(title)}</div>
@@ -14803,59 +13534,25 @@ let hindiAnimeCarouselStarted = false;
               </div>
             `;
           });
-          mbItems.forEach(item => {
-            const title = item.title || 'Untitled';
-            const poster = item.image || '';
-            const slug = String(item.slug || '').replace(/[^a-zA-Z0-9\-_/:.]/g, '');
-            const kind = item.type === 'movie' ? 'movie' : 'series';
-            html += `
-              <div class="suggestion-item" onclick="openMovieboxDetail('${slug}', '${kind}')">
-                <img src="${poster}" class="suggestion-thumb" alt="${escapeHtml(title)}" onerror="handleImgError(this)"/>
-                <div class="suggestion-info">
-                  <div class="suggestion-title">${escapeHtml(title)}</div>
-                  <div class="suggestion-sub">
-                    <span>${item.year || '—'}</span>
-                    <span>·</span>
-                    <span>${kind === 'movie' ? 'Movie' : 'Series'}</span>
-                    ${item.rating ? `
-                    <span>·</span>
-                    <span style="color: #ffbade;">⭐ ${escapeHtml(String(item.rating))}</span>` : ''}
-                  </div>
-                </div>
-              </div>
-            `;
-          });
-          indiaItems.forEach(item => {
-            const title = item.title || 'Untitled';
-            const poster = item.image || item.cover || '';
-            const kind = item.type === 'movie' ? 'movie' : 'series';
-            const idAttr = String(item.id || item.slug || '').replace(/[^a-zA-Z0-9\-_:~.]/g, '');
-            html += `
-              <div class="suggestion-item" onclick="openIndiaDetail('${idAttr}', '${kind}', this.getAttribute('data-title'))" data-title="${escapeHtml(title)}">
-                <img src="${poster}" class="suggestion-thumb" alt="${escapeHtml(title)}" onerror="handleImgError(this)"/>
-                <div class="suggestion-info">
-                  <div class="suggestion-title">${escapeHtml(title)}</div>
-                  <div class="suggestion-sub">
-                    <span>${item.year || '—'}</span>
-                    <span>·</span>
-                    <span style="color: #f59e0b;">Hindi ${kind === 'movie' ? 'Movie' : 'Anime'}</span>
-                    ${item.rating ? `
-                    <span>·</span>
-                    <span style="color: #ffbade;">⭐ ${escapeHtml(String(item.rating))}</span>` : ''}
-                  </div>
-                </div>
-              </div>
-            `;
-          });
 
-          html += `
-            <div style="padding: 10px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); cursor: pointer; color: #ffbade; font-size: 12px; font-weight: 700;" onclick="handleSearchSubmit('${escapeHtml(q)}')">
-              View all results for "${escapeHtml(q)}" &gt;
-            </div>
-          `;
+          // Painter: whatever fragments have landed so far, with the footer.
+          const parts = [];
+          const paint = (itemsHtml) => {
+            if (!itemsHtml) {
+              dropdown.innerHTML = `<div style="padding: 12px; font-size: 12px; color: #9ca3af; text-align: center;">No anime found for "${escapeHtml(q)}"</div>`;
+            } else {
+              // The query rides in a data attribute: interpolated into the
+              // inline handler it was HTML-escaped, so the browser decoded the
+              // entities back to quotes before JS parsed it and any query with
+              // an apostrophe ("king's raid") produced a syntax error instead
+              // of a working link.
+              dropdown.innerHTML = itemsHtml + `\n            <div style="padding: 10px; text-align: center; border-top: 1px solid rgba(255,255,255,0.06); cursor: pointer; color: #ffbade; font-size: 12px; font-weight: 700;" data-query="${escapeHtml(q)}" onclick="handleSearchSubmit(this.dataset.query)">\n              View all results for "${escapeHtml(q)}" &gt;\n            </div>\n          `;
+            }
+            dropdown.style.display = 'block';
+          };
+          if (html) parts.push(html);
+          if (parts.length) paint(parts.join(''));
 
-          dropdown.innerHTML = html;
-          dropdown.style.display = 'block';
         } catch (e) {
           dropdown.style.display = 'none';
         }
@@ -15169,42 +13866,6 @@ let hindiAnimeCarouselStarted = false;
         });
         grid.innerHTML = html;
 
-        // The MovieBox library is appended to the same grid so the filter page
-        // covers both catalogs.
-        if (!movieboxLibrary.length) {
-          try {
-            const mbRes = await fetch('/api/moviebox/home', { cache: 'no-store' });
-            const mbData = await mbRes.json();
-            if (mbData && mbData.success) movieboxLibrary = mbData.library || [];
-          } catch (e) {}
-        }
-        let mbList = movieboxLibrary.slice();
-        if (type === 'TV' || type === 'Movie') {
-          mbList = mbList.filter(a => (type === 'Movie' ? a.type === 'movie' : a.type === 'series'));
-        }
-        if (selectedGenres.length > 0) {
-          mbList = mbList.filter(a => {
-            const g = String(a.genre || '').toLowerCase();
-            return selectedGenres.some(sg => g.includes(sg.toLowerCase()));
-          });
-        }
-        if (mbList.length) {
-          grid.insertAdjacentHTML('beforeend', mbList.slice(0, 60).map(item => {
-            const title = item.title || 'Untitled';
-            const slug = String(item.slug || '').replace(/[^a-zA-Z0-9\-_/:.]/g, '');
-            return `
-              <div class="anime-card" onclick="openMovieboxDetail('${slug}', '${item.type === 'movie' ? 'movie' : 'series'}', this.getAttribute('data-title'))" data-title="${escapeHtml(title)}">
-                <div class="anime-poster-wrapper">
-                  <img src="${item.image || ''}" class="anime-poster" alt="${escapeHtml(title)}" onerror="handleImgError(this)"/>
-                </div>
-                <div class="anime-info">
-                  <h4 class="anime-title">${escapeHtml(title)}</h4>
-                  <div class="anime-meta">${item.year || '—'} · ${item.type === 'movie' ? 'Movie' : 'Series'}${item.rating ? ` · ⭐ ${escapeHtml(String(item.rating))}` : ''}</div>
-                </div>
-              </div>
-            `;
-          }).join(''));
-        }
       } catch (e) {
         grid.innerHTML = '<div style="padding: 40px; text-align: center; color: #9ca3af; grid-column: 1/-1;">Could not load filter results.</div>';
       }
@@ -15332,10 +13993,20 @@ let hindiAnimeCarouselStarted = false;
       const video = document.getElementById('videoNative');
       const overlay = document.getElementById('bufferOverlay');
       if (!video || !overlay) return;
-      const show = () => { if (!video.paused && !video.ended && video.style.display !== 'none') overlay.style.display = 'flex'; };
+      // Only the native element buffers; the iframe player has its own UI.
+      // `!video.paused` used to gate this, which hid the GIF for the single
+      // longest wait of all — the first load, before play() resolves. Now any
+      // stall shows it, including the cold start.
+      const nativePlayback = () => video.style.display !== 'none';
+      const show = () => { if (nativePlayback() && !video.ended) overlay.style.display = 'flex'; };
       const hide = () => { overlay.style.display = 'none'; };
       ['waiting', 'stalled', 'seeking', 'loadstart'].forEach((ev) => video.addEventListener(ev, show));
       ['playing', 'canplay', 'seeked', 'pause', 'ended', 'emptied', 'error'].forEach((ev) => video.addEventListener(ev, hide));
+      // A source switch tears the element down without always emitting
+      // 'emptied', so drop a stale GIF when the modal closes too.
+      document.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.modal-close-btn')) hide();
+      }, true);
     })();
   </script>
 </body>

@@ -20,7 +20,6 @@ import { dirname, join } from "node:path";
 import worker from "./index.js";
 import { handleAnimeApi } from "./core/anime-router.js";
 import { initHiAnimeSyncEngine } from "./core/hianime-sync.js";
-import { fetchMovieboxHome } from "./core/moviebox.js";
 import { getIndexHtml, getMangaHtml, getAdHtml } from "./core/index-html.js";
 
 const PORT  = Number(process.env.PORT) || 3000;
@@ -132,12 +131,10 @@ const server = http.createServer(async (req, res) => {
     return serveStatic(req, res, staticEntry);
   }
 
-  // Handle Anime Frontend, HiAnime API, India catalog, MovieBox API,
-  // Manga, User Auth/Sync, and Feedback routes.
+  // Handle Anime Frontend, HiAnime API, Manga, User Auth/Sync, and Feedback routes.
   if (
     pathname.startsWith("/api/anime/") ||
-    pathname.startsWith("/api/india/") ||
-    pathname.startsWith("/api/moviebox/") ||
+    pathname.startsWith("/api/mux/") ||
     pathname.startsWith("/api/manga/") ||
     pathname.startsWith("/api/hianime/") ||
     pathname.startsWith("/api/feedback/") ||
@@ -186,7 +183,4 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Hinataw.exe dev server → http://0.0.0.0:${PORT}`);
   initHiAnimeSyncEngine();
-
-// Pre-populate moviebox subject index for stream resolution
-fetchMovieboxHome().catch(() => console.warn("[server] Could not fetch MovieBox home cache"));
 });

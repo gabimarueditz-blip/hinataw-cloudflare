@@ -6,5 +6,8 @@
   "description": "Egress relay for the Freebuff-hosted Hinataw site (moviebox API + video CDN reject Cloudflare Workers)",
   "engines": {
     "node": "24.x"
+  },
+  "scripts": {
+    "start": "node server.mjs"
   }
 }

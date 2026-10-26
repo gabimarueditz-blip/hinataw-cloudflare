@@ -76,6 +76,11 @@ function viaRelay(target) {
 // the browser streams straight from it, so movie bytes never touch
 // Cloudflare; without it (local dev, relay outage) the same-origin
 // /api/moviebox/video proxy is used as before.
+//
+// The relay is not optional for video: measured from the deployed Worker, the
+// CDN answers 429 to Cloudflare egress on every header profile, and a browser
+// asking directly gets a format error, so the same-origin proxy is only a
+// fallback for hosts that are not behind Cloudflare.
 function streamUrlFor(cdnUrl) {
   const base = String(process.env.MOVIEBOX_RELAY || "").replace(/\/+$/, "");
   if (base) {
@@ -444,30 +449,45 @@ export async function fetchMovieboxList(tabId, page = 1, perPage = 24) {
   return raw.map(normalizeItem).filter(Boolean);
 }
 
-export async function searchMoviebox(query, page = 1) {
+export async function searchMoviebox(query, page = 1, trace = null) {
   const q = String(query || "").trim();
   if (!q) return [];
 
   // The signed mobile API leads: the h5 POST search is rejected outright on
   // some egresses (Render answers 429 and POSTs have no reader path), while
   // the mobile endpoint answers everywhere. The h5 search stays as the
-  // fallback when mobile is down.
+  // fallback when mobile is down. `trace` is an optional array the caller can
+  // pass (?debug=1 on the search route) to see which leg answered and how long
+  // each one took — the only way to diagnose this from a deployed Worker.
+  const mark = (leg, extra) => {
+    if (trace) trace.push({ leg, ...extra });
+  };
   let raw = [];
+  const t0 = Date.now();
   try {
     raw = await mobileSearch(q, page);
-  } catch {
+    mark("mobile", { ms: Date.now() - t0, rows: raw.length });
+  } catch (e) {
+    mark("mobile", { ms: Date.now() - t0, rows: 0, error: String((e && e.message) || e).slice(0, 160) });
     raw = [];
   }
   if (!raw.length) {
+    const t1 = Date.now();
     try {
       await ensureToken();
+      // Short timeout: this leg is a fallback, and on a Worker without the
+      // external relay it answers late or not at all. A 25s default made the
+      // whole search endpoint wait past every client timeout.
       const data = await api("/subject/search", {
         method: "POST",
+        timeout: 8000,
         payload: { keyword: q, page: Math.max(1, Number(page) || 1), perPage: 20 },
       });
       const inner = data?.data || {};
       raw = inner.items || inner.list || [];
-    } catch {
+      mark("h5", { ms: Date.now() - t1, rows: raw.length });
+    } catch (e) {
+      mark("h5", { ms: Date.now() - t1, rows: 0, error: String((e && e.message) || e).slice(0, 160) });
       raw = [];
     }
   }
@@ -746,7 +766,11 @@ function cdnHeaderProfilesFor(hostname) {
   return [CDN_PROFILE_APP, CDN_PROFILE_NODE];
 }
 
-const CDN_RETRY_STATUS = new Set([403, 426, 428, 429, 451]);
+// 427 ("upgrade your app") is the CDN's answer to the wrong client profile —
+// Cloudflare egress hits it on the bcdnxw browser-style profile and the app
+// profile then answers 206, so it belongs in the retry set rather than being
+// passed through to the player as a dead stream.
+const CDN_RETRY_STATUS = new Set([403, 426, 427, 428, 429, 451]);
 
 export async function relayMovieboxVideo(req, res, url) {
   const target = url.searchParams.get("u");
@@ -773,26 +797,38 @@ export async function relayMovieboxVideo(req, res, url) {
   for (const profile of cdnHeaderProfilesFor(parsed.hostname)) {
     const headers = { ...profile };
     if (req.headers.range) headers.Range = req.headers.range;
+    // The timeout guards the *connection*, not the download. AbortSignal
+    // .timeout(60000) also aborts the body, so any file still streaming after a
+    // minute was cut mid-flight: the browser saw Content-Length drift from the
+    // bytes it received (net::ERR_CONTENT_LENGTH_MISMATCH), fired video.onerror
+    // and the player failed over to another mirror. Once headers are in, the
+    // body is allowed to run as long as it needs.
+    const controller = new AbortController();
+    const connectTimer = setTimeout(() => controller.abort(), 20000);
+    let r;
     try {
-      const r = await fetch(viaRelay(parsed.toString()), {
+      r = await fetch(viaRelay(parsed.toString()), {
         headers,
-        signal: AbortSignal.timeout(60000),
+        signal: controller.signal,
       });
-      if (r.status === 200 || r.status === 206 || r.status === 416) {
-        upstream = r;
-        break;
-      }
-      lastStatus = r.status;
-      // A real answer about the file (404/410/…) is passed through: retrying
-      // another UA would only repeat it. Gate/lockout statuses are retried.
-      if (!CDN_RETRY_STATUS.has(r.status)) {
-        upstream = r;
-        break;
-      }
-      try { await r.body?.cancel(); } catch {}
     } catch (err) {
       lastErr = err;
+      continue;
+    } finally {
+      clearTimeout(connectTimer);
     }
+    if (r.status === 200 || r.status === 206 || r.status === 416) {
+      upstream = r;
+      break;
+    }
+    lastStatus = r.status;
+    // A real answer about the file (404/410/…) is passed through: retrying
+    // another UA would only repeat it. Gate/lockout statuses are retried.
+    if (!CDN_RETRY_STATUS.has(r.status)) {
+      upstream = r;
+      break;
+    }
+    try { await r.body?.cancel(); } catch {}
   }
 
   if (!upstream) {

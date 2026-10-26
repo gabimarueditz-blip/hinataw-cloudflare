@@ -35,6 +35,11 @@ const md5 = (input) => crypto.createHash("md5").update(input, "utf8").digest("he
 // app bootstraps it.
 let guestToken = "";
 let bootPromise = null;
+// Non-mutating content-path check so the early auth-retry decision does not
+// depend on reading the response body twice (which some runtimes reject).
+function isContentPath(path) {
+  return /\/subject-api\/|\/ugc\//.test(path);
+}
 
 function clientInfo() {
   return JSON.stringify({
@@ -71,8 +76,14 @@ function signHeaders(pathWithQuery, method, body) {
   const bodyLen = body ? String(Buffer.byteLength(body, "utf8")) : "";
   const bodyHash = body ? md5(Buffer.from(body, "utf8").subarray(0, 102400)) : "";
   const canonical =
-    `${method}\napplication/json\napplication/json;charset=UTF-8\n` +
-    `${bodyLen}\n${timestamp}\n${bodyHash}\n` +
+    `${method}
+application/json
+application/json;charset=UTF-8
+` +
+    `${bodyLen}
+${timestamp}
+${bodyHash}
+` +
     `${u.pathname}${sortedQuery ? `?${sortedQuery}` : ""}`;
   const sig = crypto
     .createHmac("md5", Buffer.from(SIGN_KEY_B64, "base64"))
@@ -132,36 +143,59 @@ async function bootstrapToken() {
 }
 
 async function mobileCall(path, { method = "GET", payload = null, timeout = 20000, retried = false } = {}) {
-  await bootstrapToken();
   const body = payload ? JSON.stringify(payload) : "";
+  const headers = signHeaders(path, method, body);
   const res = await fetch(new URL(path, BASE).toString(), {
     method,
-    headers: signHeaders(path, method, body),
+    headers,
     body: body || undefined,
     signal: AbortSignal.timeout(timeout),
   });
   absorbToken(res);
   const text = await res.text();
+  if (res.status === 429 || text.toLowerCase().includes("too many requests")) {
+    await new Promise((r) => setTimeout(r, 3500));
+    const headers2 = signHeaders(path, method, body);
+    const res2 = await fetch(new URL(path, BASE).toString(), {
+      method,
+      headers: headers2,
+      body: body || undefined,
+      signal: AbortSignal.timeout(timeout),
+    });
+    absorbToken(res2);
+    const text2 = await res2.text();
+    if (res2.ok) {
+      let json2 = null;
+      try { json2 = JSON.parse(text2); } catch {}
+      if (json2 && (json2.code === 0 || json2.code === 200)) return json2;
+    }
+  }
+
   let json = null;
   try { json = JSON.parse(text); } catch {}
 
-  const authExpired =
-    res.status === 401 ||
-    text.includes("JWT token has expired") ||
-    (json && Number(json.code) === 401);
-  if (authExpired && !retried) {
-    guestToken = "";
-    await bootstrapToken();
-    return mobileCall(path, { method, payload, timeout, retried: true });
+  // Logged-out content endpoints return 401/441 with "miss token"/
+  // "token has expired" before any guest token is held. Retry once so a
+  // logged-out user does not rely on the slow h5 fallback for the first hit.
+  if (!retried && isContentPath(path)) {
+    const code = json && typeof json.code === "number" ? json.code : null;
+    if (res.status === 401 || res.status === 441 || code === 401 || code === 441) {
+      if (/miss token|token has expired/i.test(text)) {
+        guestToken = "";
+        try { await bootstrapToken(); } catch {}
+        return mobileCall(path, { method, payload, timeout, retried: true });
+      }
+    }
   }
-  if (!res.ok) throw new Error(`moviebox-mobile ${path} -> ${res.status}`);
+  if (!res.ok) {
+    throw new Error(`moviebox-mobile ${path} -> ${res.status} ${text.slice(0, 140)}`.trim());
+  }
   if (!json) throw new Error(`moviebox-mobile ${path} -> bad json`);
   if (json.code !== undefined && Number(json.code) !== 0 && Number(json.code) !== 200) {
     throw new Error(`moviebox-mobile ${path} -> code ${json.code} ${json.message || ""}`.trim());
   }
   return json;
 }
-
 // The anti-piracy "dummy" answers: a 23-second placeholder clip on
 // macdn.aoneroom.com (or an explicit update trap). Identical to the check in
 // the Genga-World client.
@@ -303,14 +337,26 @@ export async function mobileStream({ subjectId, se = 1, ep = 1, timeout = 20000 
  * h5 pipeline normalises (detailPath derived from detailUrl) so the caller can
  * run them through the shared normaliser, which also fills the id registry.
  */
+async function cacheGuestTokenOnce() {
+  if (guestToken) return;
+  try {
+    const res = await fetch(
+      `${BASE}/wefeed-mobile-bff/tab-operating?host=api.inmoviebox.com&page=1&pageSize=24&tabId=1`,
+      { headers: signHeaders("/wefeed-mobile-bff/tab-operating?host=api.inmoviebox.com&page=1&pageSize=24&tabId=1", "GET", ""), signal: AbortSignal.timeout(15000) },
+    );
+    absorbToken(res);
+    try { await res.arrayBuffer(); } catch {}
+  } catch {}
+}
+
 export async function mobileSearch(query, page = 1, timeout = 15000) {
   const q = String(query || "").trim();
   if (!q) return [];
-  const data = await mobileCall("/wefeed-mobile-bff/subject-api/search", {
-    method: "POST",
-    payload: { keyword: q, page: Math.max(1, Number(page) || 1), pageSize: 20 },
-    timeout,
-  });
+  await cacheGuestTokenOnce();
+  const data = await mobileCall(
+    "/wefeed-mobile-bff/subject-api/search",
+    { method: "POST", payload: { keyword: q, page: Math.max(1, Number(page) || 1), pageSize: 20 }, timeout },
+  );
   const inner = data.data || {};
   const list = inner.list || inner.items || inner.subjects || (Array.isArray(data.data) ? data.data : []);
   return (Array.isArray(list) ? list : [])

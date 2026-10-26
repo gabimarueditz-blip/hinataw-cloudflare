@@ -246,16 +246,14 @@
 
   <script>
     // ===================== AD GATE =====================
-    // Same rule as the anime app: the parked tag in <head> is NEVER live until a
-    // manga is actually opened or read (or a download affordance is clicked).
-    // One-shot-per-session: the popunder may arm at most once per browser session
-    // (reload-safe because the flag is in sessionStorage, cleared on tab close).
-    // One popup per distinct viewer action: per title opened, per chapter read,
-    // per download clicked. Fired keys live in the tab session, so opening the
-    // same chapter again never fires a second popup.
+    // Same rule as the anime app: the parked tag in <head> is NEVER live until
+    // a manga is actually opened or a chapter is actually read — ads do not
+    // fire on page load, on portal switches, or on download clicks, only for
+    // reading (one popup per distinct title opened, per distinct chapter read).
     // Same persistent key store as the anime app (localStorage, 30-day TTL,
-    // capped) so one chapter read is one popup even after the tab is closed,
+    // capped), so one chapter read is one popup even after the tab is closed,
     // and the anime portal's episode keys are shared rather than duplicated.
+    // Re-opening the same chapter never fires a second popup.
     const OWNER_AD_KEYS_STORE = 'hinataw_owner_ad_keys_v2';
     const OWNER_AD_KEY_TTL = 30 * 24 * 60 * 60 * 1000;
     function ownerAdKeys() {
@@ -288,14 +286,6 @@
         return true;
       } catch (e) { return false; }
     }
-    // Switching back to the anime portal is its own viewer action: the first
-    // switch arms the tag, and switching back and forth never fires again.
-    document.addEventListener('click', function (ev) {
-      const el = ev.target && ev.target.closest
-        ? ev.target.closest('a[href="/"], a[href="index.html"], [data-portal="anime"]')
-        : null;
-      if (el) armOwnerAd('portal:manga-to-anime');
-    }, true);
 
     // Owner's zone-12024830 popunder is the ONLY ad on the site. Until a gated
     // action arms it (open manga / read chapter / download), every popup window
@@ -312,15 +302,6 @@
       };
     } catch (e) {}
 
-    // Any download control (<a download>, data-ad-trigger="download", or a
-    // button whose title contains "download") arms the tag too — without
-    // letting the actual download link open.
-    document.addEventListener('click', function (ev) {
-      const el = ev.target && ev.target.closest
-        ? ev.target.closest('a[download], [data-ad-trigger="download"], [onclick*="download" i], button[title*="download" i]')
-        : null;
-      if (el) armOwnerAd('manga-download:' + location.hash + ':' + Date.now());
-    }, true);
 
     function adBlockerDetected() {
       let hidden = false;

@@ -481,21 +481,58 @@ function extractDirectFromEmbed(html) {
   return direct || null;
 }
 
-/** Verify a candidate URL actually serves video bytes (headers only). */
+/**
+ * Verify a candidate URL actually serves video bytes.
+ *
+ * Asks for a single byte instead of the whole file: Google answers a plain GET
+ * with headers only after it has begun streaming the 100-250 MB file (~2 s per
+ * probe from a Worker), while a 1-byte range gives the same answer in a few
+ * hundred milliseconds and never buffers video in the isolate.
+ */
 async function isPlayableVideo(url, referer) {
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": UA, Accept: "*/*", Referer: referer },
+      headers: { "User-Agent": UA, Accept: "*/*", Referer: referer, Range: "bytes=0-0" },
       redirect: "follow",
       signal: AbortSignal.timeout(EMBED_TIMEOUT),
     });
     const type = (res.headers.get("content-type") || "").toLowerCase();
     const okType = type.startsWith("video/") || type.includes("octet-stream") || type.includes("mp4");
+    const servedRange = Boolean(res.headers.get("content-range"));
     try { await res.body?.cancel(); } catch {}
-    return res.ok && okType;
+    return (res.ok || res.status === 206 || servedRange) && okType;
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve every mirror at once and answer the first one that plays.
+ * Sequential probing waited ~2 s per drive, so a film with three mirrors needed
+ * 6 s and hit the router's cap — the player then reported "no stream" although
+ * every link was fine.
+ */
+function firstPlayable(entries, postUrl) {
+  return new Promise((resolve) => {
+    let pending = entries.length;
+    let settled = false;
+    if (!pending) return resolve(null);
+    for (const entry of entries) {
+      resolveNexdriveLink(entry.url, postUrl)
+        .then((resolved) => {
+          if (settled) return;
+          if (resolved) {
+            settled = true;
+            resolve({ entry, resolved });
+            return;
+          }
+          if (--pending === 0) resolve(null);
+        })
+        .catch(() => {
+          if (!settled && --pending === 0) resolve(null);
+        });
+    }
+  });
 }
 
 /**
@@ -600,32 +637,40 @@ export async function resolveHindiStream(episodeId, movieId) {
       ? candidates[parsed.index]
       : (wantsMovie ? ordered[0] : ordered[0]);
 
-  const attempts = [chosen, ...ordered.filter((e) => e !== chosen)].slice(0, 4);
-
-  for (const entry of attempts) {
-    const resolved = await resolveNexdriveLink(entry.url, detail.url);
-    if (!resolved) continue;
-    return {
-      success: true,
-      type: episodeId ? "episode" : "movie",
-      title: detail.title,
-      poster: detail.poster,
-      quality: entry.quality || "",
-      // `stream` stays a plain string for older callers; `streams` is the
-      // richer shape the current player prefers (it picks streams[0]).
-      stream: resolved.url,
-      streams: [
-        {
-          url: resolved.url,
-          quality: entry.quality || "",
-          label: `${entry.quality || "Auto"} · ${entry.source}`,
-          server: entry.source || "G-Direct",
-          type: "mp4",
-        },
-      ],
-    };
+  // One drive usually appears once per quality/mirror label; collapsing them
+  // keeps a single page from being parsed (and probed) several times.
+  const unique = [];
+  const seenUrls = new Set();
+  for (const entry of [chosen, ...ordered]) {
+    if (!entry || seenUrls.has(entry.url)) continue;
+    seenUrls.add(entry.url);
+    unique.push(entry);
+    if (unique.length >= 4) break;
   }
-  return null;
+
+  const hit = await firstPlayable(unique, detail.url);
+  if (!hit) return null;
+  const { entry, resolved } = hit;
+
+  return {
+    success: true,
+    type: episodeId ? "episode" : "movie",
+    title: detail.title,
+    poster: detail.poster,
+    quality: entry.quality || "",
+    // `stream` stays a plain string for older callers; `streams` is the
+    // richer shape the current player prefers (it picks streams[0]).
+    stream: resolved.url,
+    streams: [
+      {
+        url: resolved.url,
+        quality: entry.quality || "",
+        label: `${entry.quality || "Auto"} · ${entry.source}`,
+        server: entry.source || "G-Direct",
+        type: "mp4",
+      },
+    ],
+  };
 }
 
 // ---------------------------------------------------------------------------

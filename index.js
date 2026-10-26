@@ -17,7 +17,7 @@ import animeonsenHandler           from "./providers/animeonsen.js";
 import { getEpisodesResponse, getFilteredEpisodesResponse } from "./core/episode-cache.js";
 import { resolveProviders }         from "./core/episode-strategy.js";
 import { getAsync, setAsync, isFresh, mapTTL, WATCH_TTL, _CACHE_ENABLED } from "./core/smartcache.js";
-import { getIndexHtml, getLogoSvg, getPngAsset, getSwJs } from "./core/index-html.js";
+import { getIndexHtml, getLogoSvg, getPngAsset, getGifAsset, getSwJs } from "./core/index-html.js";
 import { handleAnimeApi } from "./core/anime-router.js";
 
 // Bridge the Node-style (req, res) anime router into the Web-standard fetch entrypoint.
@@ -194,12 +194,10 @@ export default {
       });
     }
 
-    // Anime catalog / HiAnime / India / MovieBox / user-progress endpoints
-    // (served by core/anime-router.js)
+    // Anime catalog / HiAnime / user-progress endpoints (core/anime-router.js)
     if (
       path.startsWith("/api/anime/") ||
-      path.startsWith("/api/india/") ||
-      path.startsWith("/api/moviebox/") ||
+      path.startsWith("/api/mux/") ||
       path.startsWith("/api/manga/") ||
       path.startsWith("/api/hianime/") ||
       path.startsWith("/api/feedback/") ||
@@ -240,6 +238,24 @@ export default {
           "Service-Worker-Allowed": "/",
         },
       });
+    }
+
+    // Buffering animation. It is an <img> on the player page, so it has to be
+    // served as a GIF from this origin: without an explicit route the HTML
+    // catch-all answered with text/html and the browser refused the image
+    // (ERR_BLOCKED_BY_ORB), leaving the buffer spinner blank on the deployed
+    // site even though the dev server served public/ from disk.
+    if (path === "/pikachu-buffer.gif") {
+      const buf = getGifAsset("pikachu-buffer.gif");
+      if (buf) {
+        return new Response(buf, {
+          status: 200,
+          headers: {
+            "Content-Type": "image/gif",
+            "Cache-Control": "public, max-age=86400",
+          },
+        });
+      }
     }
 
     if (path === "/logo.svg") {

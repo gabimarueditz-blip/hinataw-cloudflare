@@ -58,7 +58,7 @@
     </p>
     <div id="ad-slot"></div>
     <button id="continue" type="button" disabled>Continue in <span id="secs">3</span>…</button>
-    <p class="skip"><a id="skip" href="/" target="_blank" rel="noopener">Back to the site</a></p>
+    <p class="skip"><a id="skip" href="/">Back to the episode</a></p>
     <p class="fine">One sponsor page per episode. You can close this tab at any time.</p>
   </main>
 
@@ -115,30 +115,49 @@
 
       // The network answers the first click in this tab by loading the sponsor.
       // If it does not (tag blocked, no creative for this visitor), the click
-      // must never strand the viewer on a dead page: hand them back to where
-      // they came from. On a same-tab visit that is one step back in history, so
-      // the player page they left is exactly what they get.
-      function fallback() {
-        // Opened by the player, so this tab is ours to close: the viewer lands
-        // back on the episode instead of a dead sponsored page. The network caps
-        // impressions per visitor, so "no sponsor this time" is a normal outcome
-        // and must never leave a blank tab behind. A tab the browser will not let
-        // script close goes home instead.
+      // must never strand the viewer on a dead page: hand them back to the page
+      // they came from. That page is the player, and its return marker reopens
+      // the episode — so Back, not Home, is always the destination. There is no
+      // separate return page: the browser's own history does the job.
+      function goBack() {
+        // Close first: if this really is a separate sponsored tab, closing it
+        // reveals the episode still sitting open in the tab behind.
         try { window.close(); } catch (e) {}
-        setTimeout(function () { location.replace('/'); }, 400);
+        setTimeout(function () {
+          try {
+            if (history.length > 1) { history.back(); return; }
+          } catch (e) {}
+          // Only a page opened with no history at all (a bookmark, a pasted
+          // link) has nowhere to go back to.
+          location.replace('/');
+        }, 400);
       }
+      // "Back to the episode" and Continue both take the browser's own history
+      // route. The link keeps href="/" only as a no-JS fallback.
+      if (skip) {
+        skip.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          goBack();
+        });
+      }
+      // The viewer pressed Back from the advertiser and landed here again.
+      // Bounce one more step straight to the episode instead of asking them to
+      // press Back twice.
+      window.addEventListener('pageshow', function (ev) {
+        if (!ev.persisted) return;
+        try { history.back(); } catch (e) {}
+      });
       btn.addEventListener('click', function () {
         remember();
         // Long enough for a slow creative to start loading (a navigation kills
         // this timer); short enough that a capped visitor is not stranded.
-        setTimeout(fallback, 2500);
+        setTimeout(goBack, 2500);
       });
-      // Any click in the page is enough for the network; the same fallback keeps
+      // Any click in the page is enough for the network; the same return keeps
       // an accidental click from leaving this tab blank.
       document.addEventListener('click', function (ev) {
         remember();
-        if (ev.target === skip) return;
-        setTimeout(fallback, 2800);
+        setTimeout(goBack, 2800);
       }, false);
     })();
   </script>

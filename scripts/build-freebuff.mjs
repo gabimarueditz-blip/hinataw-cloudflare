@@ -31,7 +31,10 @@ try {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // --- 1. preloaded.js -------------------------------------------------------
-const PRELOAD_KEYS = ["hianime-cache", "users", "feedback", "moviebox-home-stale"]; // NOT notices
+// Only the HiAnime catalog seed plus the local users/feedback migration ship.
+// The MovieBox home/search preloads were dropped with the MovieBox integration
+// (they alone were ~1.8 MiB of the 10 MiB bundle limit).
+const PRELOAD_KEYS = ["hianime-cache", "users", "feedback"]; // NOT notices
 const preloaded = {};
 for (const key of PRELOAD_KEYS) {
   const p = path.join(root, "data", key + ".json");

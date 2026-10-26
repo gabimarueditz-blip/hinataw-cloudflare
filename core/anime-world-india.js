@@ -60,7 +60,7 @@ const INDIA_VIDEO_UA =
 // Only proxy hosts that are part of the animahd CDN cluster. This is not an
 // open proxy: it will refuse anything outside the known domain set.
 const INDIA_CDN_HOSTS =
-  /(\.animahd\.com|\.animahd\d+\.workers\.dev|\.netfilm\.world|\.aoneroom\.com|\.hakunaymatata\.com)$/i;
+  /(\.animahd\.com|\.animahd\d+\.workers\.dev|\.netfilm\.world|\.aoneroom\.com|\.hakunaymatata\.com|^video-downloads\.googleusercontent\.com)$/i;
 
 // ============================================================================
 // AnimeWorld-India (animeworld-india.me) catalog / search / stream helpers.
@@ -517,11 +517,21 @@ export async function relayIndiaVideo(req, res, url) {
   }
 
   try {
-    const upstream = await fetch(parsed.toString(), {
-      method: "GET",
-      headers,
-      signal: AbortSignal.timeout(60000),
-    });
+    // Connect timeout only. AbortSignal.timeout would also cut the body after a
+    // minute, truncating any file still downloading — the browser then reports
+    // ERR_CONTENT_LENGTH_MISMATCH and the player fails over mid-episode.
+    const controller = new AbortController();
+    const connectTimer = setTimeout(() => controller.abort(), 20000);
+    let upstream;
+    try {
+      upstream = await fetch(parsed.toString(), {
+        method: "GET",
+        headers,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(connectTimer);
+    }
 
     if (!upstream.ok && upstream.status !== 403 && upstream.status !== 401) {
       throw new Error(`remote returned ${upstream.status}`);
@@ -534,7 +544,11 @@ export async function relayIndiaVideo(req, res, url) {
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
     res.setHeader("Accept-Ranges", upstream.headers.get("accept-ranges") || "bytes");
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "public, max-age=600");
+    // Never edge-cache this: a cached *partial* body (the first bytes the
+    // viewer happened to read) then answered every later request, so seeking
+    // and even the first frame broke. Range requests must reach the origin and
+    // stop there.
+    res.setHeader("Cache-Control", "no-store");
 
     const cr = upstream.headers.get("content-range");
     if (cr) res.setHeader("Content-Range", cr);

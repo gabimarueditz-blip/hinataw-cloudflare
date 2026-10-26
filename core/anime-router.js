@@ -6,48 +6,6 @@ import { FEATURED_ANIME, searchAnime, getAnimeById } from "./anime-service.js";
 import { searchHiAnime, browseHiAnime, getHiAnimeEpisodes, getAnimeWithEpisodes, getHiAnimeEpisodeStream } from "./hianime-service.js";
 import { getSyncedHiAnimeData, loadHiAnimeCacheFromDisk, runHiAnimeSync, searchSyncedAnime, getSyncedAnimeByLetter } from "./hianime-sync.js";
 import { getTrendingOngoing } from "./anilist.js";
-// Second Hindi catalogue (AnimeSalt / WatchAnimeWorld) behind one JSON shape.
-import {
-  fetchMovieboxHome,
-  fetchMovieboxList,
-  searchMoviebox,
-  fetchMovieboxDetail,
-  fetchMovieboxStream,
-  relayMovieboxVideo,
-  getSeenMovieboxSubjects,
-} from "./moviebox.js";
-import {
-  fetchIndiaHome,
-  fetchIndiaSeries,
-  fetchIndiaMovies,
-  searchIndia,
-  fetchIndiaSeasons,
-  fetchIndiaEpisodes,
-  fetchIndiaStream,
-  fetchIndiaCatalog,
-  fetchIndiaTotals,
-  relayIndiaVideo,
-  pickStreamURL,
-} from "./anime-world-india.js";
-// Hindi-dubbed catalog that is actually reachable when animeworld-india.me is
-// DNS-blocked (see core/hindi-dubbed.js for the source chain).
-import {
-  fetchHindiHome,
-  fetchHindiSeriesPage,
-  fetchHindiMoviesPage,
-  searchHindi,
-  fetchHindiDetail,
-  fetchHindiEpisodes,
-  resolveHindiStream,
-  mergeHindiItems,
-} from "./hindi-dubbed.js";
-// Hindi per-episode catalog (ToonStream). See core/toonstream.js: gokuhd only
-// ships whole-season packs, so episode-wise Hindi sources come from here.
-import {
-  findToonstreamSeries,
-  fetchToonstreamEpisodes,
-  fetchBestToonstreamServer,
-} from "./toonstream.js";
 import { pipeWebStream, pipeReader, drainReader, canStream, isLocked } from "./stream-utils.js";
 import anikotoHandler, { getEpisodes as getAnikotoEpisodes } from "../providers/anikoto.js";
 import { extractMegaPlayDetails, canExtractMegaPlay } from "../extractors/megaplay.js";
@@ -108,6 +66,8 @@ function selectBestAnimeMatch(targetTitle, results) {
 }
 const streamCache = new Map();
 const episodeListCache = new Map();
+const animeSearchCache = new Map();
+const animeSearchCacheTtl = 5 * 60 * 1000;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 const FEEDBACK_FILE = path.join(process.cwd(), "data", "feedback.json");
@@ -162,6 +122,23 @@ function requirePortalAuth(req, url, res) {
     return false;
   }
   return true;
+}
+
+// --- Owner-uploaded titles (Mux embeds) ----------------------------------
+// The owner pastes a Mux playback ID (or a full player.mux.com URL / embed
+// snippet) from the Owner Portal. Playback is the public Mux player iframe,
+// so this site needs no Mux account, API key or signed URL — the embed plays
+// as-is in our own player chrome.
+function muxEmbedFor(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  const fromUrl = /player\.mux\.com\/([A-Za-z0-9_-]+)/i.exec(s);
+  const playbackId = fromUrl ? fromUrl[1] : (/^[A-Za-z0-9_-]{6,}$/.test(s) ? s : null);
+  if (!playbackId) return null;
+  return {
+    playbackId,
+    embedUrl: `https://player.mux.com/${playbackId}?autoplay=true&title=0&portrait=0&paused=0`,
+  };
 }
 
 // --- Feedback -> owner email (Resend) ---
@@ -406,482 +383,6 @@ async function autoFixFeedbackReport(report) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Hindi movies library — the merged catalogue behind the Hindi Movies row.
-//
-// animahd.com only carries six movies (its two movie categories overlap to the
-// same six posts, and no other post has "movie" in its title), which is why the
-// row looked empty beside the MovieBox rows. MovieBox contributes two ways: its
-// curated home sections (Bollywood / South Indian / Hollywood / Cinema — the
-// feed the site already trusts, since the raw tab browse interleaves non-video
-// uploads) and keyword searches, which is where the cartoon movies live
-// (Doraemon, Shinchan, Pokémon, Motu Patlu, ...). Merged by title, animahd
-// first so the Hindi anime movies are never pushed out, cached for 10 minutes
-// so one page load does not fan out to MovieBox every visit.
-//
-// INDIAN MOVIE SECTIONS from MovieBox: We only include Bollywood and South Indian
-// sections (which are Hindi/Indian language movies). Hollywood section is EXCLUDED
-// because it contains English movies that should not be in the Hindi Movies row.
-// ---------------------------------------------------------------------------
-const CARTOON_QUERIES = [
-  // Specific Hindi/Indian cartoon names only
-  "doraemon", "shinchan", "shin chan", "pokemon movie",
-  "motu patlu", "chhota bheem", "little singham",
-  "oggy and the cockroaches", "tom and jerry",
-];
-
-// MovieBox sections that contain Indian/Hindi language movies
-const INDIAN_MOVIE_SECTIONS = [
-  "Bollywood",
-  "South Indian",
-  "Indian Drama",
-  "Cinema",
-];
-
-let hindiMoviesLibraryCache = { at: 0, items: null };
-
-
-
-async function getHindiMoviesLibrary() {
-  const TTL = 10 * 60 * 1000;
-  if (hindiMoviesLibraryCache.items && Date.now() - hindiMoviesLibraryCache.at < TTL) {
-    return {
-      items: hindiMoviesLibraryCache.items,
-      total: hindiMoviesLibraryCache.items.length,
-      cached: true,
-    };
-  }
-
-  // Every leg is bounded: this endpoint used to hang for minutes whenever
-  // MovieBox rate-limited (its home ladder alone can run for a minute), which
-  // left the Hindi Movies row loading forever instead of falling back to the
-  // goku catalog that answers in seconds.
-  const bounded = (p, ms) =>
-    Promise.race([p, new Promise((resolve) => setTimeout(() => resolve(null), ms))]).catch(() => null);
-  const [goku, home, ...searches] = await Promise.all([
-    bounded(fetchHindiMoviesPage(1), 15000),
-    bounded(fetchMovieboxHome(), 12000),
-    ...CARTOON_QUERIES.map((q) => bounded(searchMoviebox(q), 8000)),
-  ]);
-
-  const items = [];
-  const seen = new Set();
-  
-  const push = (it, source) => {
-    if (!it || !it.title || it.type !== "movie") return;
-    
-    // The kids-keyword searches also surface adult titles (they are genre-
-    // tagged), which have no place in this row. Gate on genre, not title —
-    // "Shin Chan: The Adult Empire Strikes Back" is an Anime/Action movie.
-    if (/\b(adult|erotic|porn|xxx)\b/i.test(String(it.genre || ""))) return;
-    
-    const key = String(it.title).toLowerCase().replace(/\s+/g, " ").trim();
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    items.push(it);
-  };
-
-  // Add gokuhd's Hindi-dubbed movies first — this is the reachable catalog.
-  // The legacy animahd fetchIndiaCatalog leg is DNS-blocked on most networks
-  // and always returned null, which emptied the row whenever MovieBox also
-  // rate-limited.
-  ((goku && goku.items) || []).forEach((it) => push(it && !it.type ? { ...it, type: "movie" } : it, "goku"));
-  
-  // Add cartoon search results - filter to only Hindi/Indian cartoons
-  // Cartoon searches return both Hindi and non-Hindi versions.
-  // Only include if title has Hindi/Indian language indicators.
-  searches.forEach((list) => 
-    (list || []).forEach((it) => {
-      const title = String(it.title || '').toLowerCase();
-      // Check for Hindi/Indian language indicators in title
-      const hasHindiIndicator = /\[(hindi|tamil|telugu|malayalam|kannada|bhojpuri|punjabi)\]/i.test(title)
-        || /\b(hindi|dubbed)\b.*\[(hindi|tamil|telugu|malayalam|kannada)\]/i.test(title)
-        || /\[(hindi|tamil|telugu|malayalam|kannada)\].*\b(hindi|dubbed)\b/i.test(title);
-      // Also check if title already contains Indian language name as a word
-      const hasIndianLanguage = /\b(hindi|tamil|telugu|malayalam|kannada|bhojpuri|punjabi|bollywood|tollywood|kollywood)\b/i.test(title);
-      if (hasHindiIndicator || hasIndianLanguage) {
-        push(it, "cartoon");
-      }
-    })
-  );
-  
-  // Log what we're adding for debugging
-  console.log('[HindiMovies] Adding animahd movies:', items.length);
-  
-  // Add MovieBox Indian movie sections only (not Hollywood)
-  // But filter each item to ensure it's actually Hindi/Indian language
-  if (home && home.sections) {
-    for (const section of home.sections) {
-      const sectionTitle = section.title.toLowerCase();
-      // Only include Indian/Hindi movie sections, not Hollywood
-      if (INDIAN_MOVIE_SECTIONS.some((s) => sectionTitle.includes(s.toLowerCase()))) {
-        section.items.forEach((it) => {
-          const title = String(it.title || '').toLowerCase();
-          // Check if item has Hindi/Indian language indicators
-          const hindiPattern = /\b(hindi|tamil|telugu|malayalam|kannada|bhojpuri|punjabi|bollywood|tollywood|kollywood)\b/i;
-          const bracketedPattern = /\[(hindi|tamil|telugu|malayalam|kannada)\]/i;
-          if (hindiPattern.test(title) || bracketedPattern.test(title) || /\[(punjabi)\]/i.test(title)) {
-            push(it, "moviebox");
-          }
-        });
-      }
-    }
-  }
-  
-  // An empty refresh (both upstreams rate-limiting or rotting) must never
-  // replace a good list or be cached: serve the last non-empty library.
-  if (!items.length && hindiMoviesLibraryCache.items && hindiMoviesLibraryCache.items.length) {
-    return {
-      items: hindiMoviesLibraryCache.items,
-      total: hindiMoviesLibraryCache.items.length,
-      cached: true,
-      stale: true,
-    };
-  }
-  if (items.length) hindiMoviesLibraryCache = { at: Date.now(), items };
-  return { items, total: items.length, cached: false };
-}
-
-// ---------------------------------------------------------------------------
-// MovieBox-Hindi catalogue fallback for the Hindi grids.
-//
-// gokuhd and animahd are unreachable from some hosting providers' egress
-// (Render, Cloudflare Workers), which left /api/india/series, /movies and
-// /library — and the home page's Hindi rows — completely empty on those
-// hosts. The MovieBox API is reachable from everywhere and searching it for
-// "hindi" returns the same badge-Hindi titles, so one cached search keeps
-// the grids populated in the same item shape the UI already renders.
-// ---------------------------------------------------------------------------
-const movieboxHindiFallback = { at: 0, items: [] };
-const MOVIEBOX_HINDI_FALLBACK_TTL = 30 * 60 * 1000;
-
-// The bundled/durable home seed carries id+slug+badge for every cached
-// title and needs no upstream call, so it backs both the Hindi grids and
-// the id map on hosts where the home/search ladder is slow or blocked.
-let movieboxLibrarySeed = null;
-async function getMovieboxLibrarySeed() {
-  if (Array.isArray(movieboxLibrarySeed) && movieboxLibrarySeed.length) return movieboxLibrarySeed;
-  let lib = movieboxHomeStale && Array.isArray(movieboxHomeStale.data?.library) ? movieboxHomeStale.data.library : null;
-  if (!lib || !lib.length) {
-    try {
-      const doc = await readDoc("moviebox-home-stale", null);
-      lib = doc && Array.isArray(doc.data?.library) ? doc.data.library : null;
-    } catch { lib = null; }
-  }
-  if (Array.isArray(lib) && lib.length) {
-    movieboxLibrarySeed = lib.filter((it) => it && it.id && it.slug);
-    return movieboxLibrarySeed;
-  }
-  return [];
-}
-
-// MovieBox's Hindi pool is mostly live-action, so the rows that promise
-// anime can only be trusted after checking the genre the catalogue returns.
-function looksLikeAnimeItem(it) {
-  return /anime|animation|donghua|cartoon/i.test(String((it && it.genre) || ""));
-}
-
-async function getMovieboxHindiCatalog(type = "all") {
-  if (!movieboxHindiFallback.items.length || Date.now() - movieboxHindiFallback.at >= MOVIEBOX_HINDI_FALLBACK_TTL) {
-    const results = await searchMoviebox("hindi").catch(() => []);
-    let items = (results || [])
-      .filter((it) => it && it.slug && /hindi/i.test(String(it.badge || "")))
-      .map((it) => ({
-        id: `moviebox:${it.id}`,
-        postId: "",
-        slug: it.slug,
-        title: it.title || "",
-        rawTitle: it.title || "",
-        image: it.image || "",
-        year: String(it.year || ""),
-        rating: String(it.rating || ""),
-        quality: "",
-        type: it.type === "movie" ? "movie" : "series",
-        genre: String(it.genre || ""),
-        badge: String(it.badge || ""),
-        url: "",
-        source: "moviebox",
-      }));
-    // The search POST is rejected on some hosting providers' egress (Render
-    // returns an empty payload), so the bundled seed catalogue fills in.
-    if (!items.length) {
-      const seed = await getMovieboxLibrarySeed().catch(() => []);
-      items = seed
-        .filter((it) => /hindi/i.test(String(it.badge || "")) || /hindi/i.test(String(it.title || "")))
-        .map((it) => ({
-          id: `moviebox:${it.id}`,
-          postId: "",
-          slug: it.slug,
-          title: it.title || "",
-          rawTitle: it.title || "",
-          image: it.image || "",
-          year: String(it.year || ""),
-          rating: String(it.rating || ""),
-          quality: "",
-          type: it.type === "movie" ? "movie" : "series",
-          genre: String(it.genre || ""),
-          badge: String(it.badge || ""),
-          url: "",
-          source: "moviebox",
-        }));
-    }
-    if (items.length) {
-      movieboxHindiFallback.at = Date.now();
-      movieboxHindiFallback.items = items;
-    }
-  }
-  const items = movieboxHindiFallback.items;
-  return type === "all" ? items : items.filter((it) => it.type === type);
-}
-
-// ---------------------------------------------------------------------------
-// MovieBox id -> { slug, title, image } map.
-//
-// The Hindi rows include MovieBox's Hindi anime, whose ids are subject ids.
-// Playing one needs the detail slug for /api/moviebox/stream, and the India
-// endpoints only receive the id back from the browser, so keep a short-lived
-// index built from the same home payload the rows come from.
-// ---------------------------------------------------------------------------
-let movieboxIdIndex = { at: 0, map: new Map() };
-const MOVIEBOX_ID_TTL = 10 * 60 * 1000;
-
-async function getMovieboxIdMap() {
-  const fresh = movieboxIdIndex.map.size && Date.now() - movieboxIdIndex.at < MOVIEBOX_ID_TTL;
-  if (!fresh) {
-    const home = await fetchMovieboxHome().catch(() => null);
-    const map = new Map();
-    for (const section of home?.sections || []) {
-      for (const it of section?.items || []) {
-        if (!it?.id || !it?.slug) continue;
-        map.set(String(it.id), {
-          slug: String(it.slug),
-          title: it.title || "",
-          image: it.image || "",
-          type: it.type,
-        });
-      }
-    }
-    if (map.size) movieboxIdIndex = { at: Date.now(), map };
-  }
-
-  // Merge the wider registry: the home payload never lists every title the
-  // Hindi rows offer (cartoon/search-sourced movies are absent from it), and
-  // without their slugs the player fell through to the blocked legacy source
-  // and answered "stream links no longer available".
-  const map = movieboxIdIndex.map;
-  for (const [id, meta] of getSeenMovieboxSubjects()) {
-    if (!map.has(id)) map.set(id, meta);
-  }
-  // The bundled seed catalogue is available before any upstream call
-  // succeeds, so cold instances resolve slugs for its titles instead of
-  // answering the India bridge with 404 while the home ladder warms.
-  const seed = await getMovieboxLibrarySeed().catch(() => []);
-  for (const it of seed) {
-    const id = String(it.id);
-    if (!map.has(id)) {
-      map.set(id, { slug: String(it.slug), title: it.title || "", image: it.image || "", type: it.type });
-    }
-  }
-  return map;
-}
-
-// ---------------------------------------------------------------------------
-// Real per-episode Hindi sources for a gokuhd title.
-//
-// A gokuhd post is one whole-season file: its download block lists qualities and
-// mirrors of that pack ("S04 720p [230MB/E]"), never individual episodes, so
-// nothing after episode 1 can come from it. The same show is usually on MovieBox
-// with genuine per-episode Hindi sources behind a se/ep player API we can
-// already reach, so match by title and offer its seasons instead.
-// ---------------------------------------------------------------------------
-const gokuEpisodeSourceIndex = new Map(); // slug -> { at, match }
-const GOKU_EPISODE_SOURCE_TTL = 10 * 60 * 1000;
-
-// MovieBox endpoint result caches (module scope): the upstream GET ladder is
-// slow (~90s cold) and rate-limits in waves, so the last good answer is kept
-// per isolate and served when a refresh fails — a stale row beats an error
-// row, and the rejected call keeps warming the ladder in the background.
-const movieboxHomeStale = { data: null, at: 0 };
-let movieboxHomeRefreshing = false;
-const movieboxListStale = new Map(); // "tab:page" -> items
-const movieboxSearchStale = new Map(); // normalized query -> items (LRU)
-const MOVIEBOX_ENDPOINT_CAP_MS = 15000;
-
-function movieboxCap(ms = MOVIEBOX_ENDPOINT_CAP_MS, label = "request") {
-  let timer;
-  const cap = new Promise((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`MovieBox ${label} exceeded ${Math.round(ms / 1000)}s (cold isolate)`)),
-      ms,
-    );
-  });
-  // Clear the timer once the race settles; the derived promise swallows the
-  // losing rejection so it is never an unhandled rejection.
-  cap.finally(() => clearTimeout(timer)).catch(() => {});
-  return cap;
-}
-
-/** Strip dub/quality/season noise so the title can be used as a search query. */
-function movieboxSearchQuery(title) {
-  return String(title || "")
-    .replace(/\[[^\]]*\]/g, " ")
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/\b(?:hindi|dubbed|dub|org|dual|audio|multi|bluray|blu|ray|web|dl|webrip|hdtv|hdrip|batch|series|movie|episode)s?\b/gi, " ")
-    .replace(/\b(?:1080p|720p|480p|360p|2160p|4k|10bit|x264|x265|hevc|avc)\b/gi, " ")
-    .replace(/[^a-z0-9]+/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/** Comparable form of a title: no season/quality/dub noise, no punctuation. */
-function normalizeMatchTitle(raw) {
-  return String(raw || "")
-    .toLowerCase()
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/\[[^\]]*\]/g, " ")
-    .replace(/\b(?:hindi|dubbed|dub|subbed|org|multi|audio|bluray|blu|ray|web|dl|webrip|hdtv|hdrip|batch|series|movie|anime|all|part|the)\b/gi, " ")
-    .replace(/\b(?:1080p|720p|480p|360p|2160p|4k|10bit|x264|x265|hevc|avc)\b/gi, " ")
-    .replace(/\bs\d{1,2}\b/gi, " ")
-    .replace(/\b(?:19|20)\d{2}\b/g, " ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/** True when two normalised titles name the same show (exact or contained). */
-function sameShowTitle(a, b) {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  // Be more lenient: allow title matching with diff up to 50 chars and min length of 2
-  if (short.length < 2) return false;
-  return long.startsWith(short) && long.length - short.length <= 50;
-}
-
-/**
- * MovieBox counterpart of a gokuhd series, with its real season/episode counts.
- * Returns { id, slug, title, image, seasons } or null when none matches.
- */
-async function findMovieboxEpisodeSource(slug, wantedType = "series") {
-  const base = String(slug || "").replace(/^goku:/, "");
-  if (!base) return null;
-  const key = `${base}::${wantedType}`;
-  const hit = gokuEpisodeSourceIndex.get(key);
-  if (hit && Date.now() - hit.at < GOKU_EPISODE_SOURCE_TTL) return hit.match;
-
-  let match = null;
-  try {
-    const detail = await fetchHindiDetail(base).catch(() => null);
-    const query = movieboxSearchQuery(detail?.title || base);
-    if (query) {
-      const results = await searchMoviebox(query).catch(() => []);
-      // Only accept a candidate whose title actually is the same show. Without
-      // this guard a search for "attack on titan" happily returns "Overgeared"
-      // (the first Hindi series in the results) and the card would then list a
-      // completely different series.
-      const wanted = normalizeMatchTitle(query);
-      const candidates = (results || [])
-        .filter((it) => it && it.type === wantedType && it.slug)
-        .filter((it) => sameShowTitle(normalizeMatchTitle(it.title), wanted))
-        .sort(
-          (a, b) => (/hindi/i.test(String(b.badge)) ? 1 : 0) - (/hindi/i.test(String(a.badge)) ? 1 : 0),
-        );
-      for (const candidate of candidates.slice(0, 4)) {
-        const det = await fetchMovieboxDetail(candidate.slug).catch(() => null);
-        if (!det) continue;
-        const seasons = (det.seasons || []).filter((s) => (s.maxEp || 0) > 1 || (s.allEp || []).length > 1);
-        // Films have no multi-episode seasons; only series need one to match.
-        if (wantedType === "series" && !seasons.length) continue;
-        match = {
-          id: String(det.id),
-          slug: det.slug,
-          title: det.title,
-          image: det.image || candidate.image || "",
-          seasons: det.seasons || [],
-          type: wantedType,
-        };
-        break;
-      }
-    }
-  } catch {}
-  gokuEpisodeSourceIndex.set(key, { at: Date.now(), match });
-  return match;
-}
-
-// ---------------------------------------------------------------------------
-// ToonStream counterpart of a gokuhd title.
-//
-// This is the episode-wise Hindi source the rows were missing: one page per
-// episode with several embed servers, versus gokuhd's single season pack.
-// ---------------------------------------------------------------------------
-const gokuToonSourceIndex = new Map(); // slug -> { at, match }
-const GOKU_TOON_SOURCE_TTL = 10 * 60 * 1000;
-
-function extractCoreAnimeTitle(raw) {
-  return String(raw || "")
-    .replace(/\[[^\]]*\]/g, " ")
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/\b(?:season[\s-]*\d+|s\d+|part[\s-]*\d+|episode[\s-]*\d+|ep[\s-]*\d+)[\s\S]*$/i, "")
-    .replace(/\b(?:hindi|dubbed|dub|org|dual|audio|multi|web|dl|bluray|hd|1080p|720p)[\s\S]*$/i, "")
-    .replace(/[^a-z0-9]+/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function findToonstreamForGoku(slug) {
-  const key = String(slug || "").replace(/^goku:/, "");
-  if (!key) return null;
-  const hit = gokuToonSourceIndex.get(key);
-  if (hit && Date.now() - hit.at < GOKU_TOON_SOURCE_TTL) return hit.match;
-
-  let match = null;
-  try {
-    const detail = await fetchHindiDetail(key).catch(() => null);
-    const rawQuery = detail?.title || key.replace(/-/g, " ");
-    const coreQuery = extractCoreAnimeTitle(rawQuery);
-    if (coreQuery) {
-      match = await findToonstreamSeries(coreQuery).catch(() => null);
-    }
-    if (!match) {
-      const cleanQuery = movieboxSearchQuery(rawQuery);
-      match = await findToonstreamSeries(cleanQuery || rawQuery).catch(() => null);
-    }
-  } catch {}
-  gokuToonSourceIndex.set(key, { at: Date.now(), match });
-  return match;
-}
-
-/** Episode-wise seasons from ToonStream for a gokuhd title (empty when unmatched). */
-async function getToonstreamSeasons(seriesID) {
-  const match = await findToonstreamForGoku(seriesID);
-  if (!match) return [];
-  const first = await fetchToonstreamEpisodes(match.slug, 1).catch(() => null);
-  if (!first?.episodes?.length) return [];
-  const numbers = first.seasons?.length ? first.seasons : [1];
-  return numbers.map((n) => ({
-    seasonNumber: String(n),
-    seasonName: `Season ${n}`,
-    episodes: n === 1 ? String(first.episodes.length) : "",
-    seasonId: `toon:${match.slug}~S${n}`,
-    url: `https://toonstream.dad/episode/${match.slug}-${n}x1/`,
-  }));
-}
-
-/** Real episode counts as India seasons for a gokuhd title (empty when unmatched). */
-async function getRealEpisodeSeasons(seriesID) {
-  const match = await findMovieboxEpisodeSource(seriesID);
-  if (!match) return [];
-  return match.seasons
-    .filter((s) => (s.maxEp || 0) > 0 || (s.allEp || []).length > 0)
-    .map((s) => ({
-      seasonNumber: String(s.se),
-      seasonName: `Season ${s.se}`,
-      episodes: String((s.allEp || []).length || s.maxEp || 0),
-      seasonId: `moviebox:${match.id}~S${s.se}`,
-      url: "",
-    }));
-}
-
 export async function handleAnimeApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || "localhost:3000"}`);
   const pathname = url.pathname;
@@ -891,24 +392,10 @@ export async function handleAnimeApi(req, res) {
     return handleProxyStream(req, res, url);
   }
 
-  // Handle Image Proxy Route (both the legacy path and the MovieBox alias).
-  if (pathname === "/api/anime/image-proxy" || pathname === "/api/moviebox/image-proxy") {
+  // Handle Image Proxy Route.
+  if (pathname === "/api/anime/image-proxy") {
     return handleImageProxy(req, res, url);
   }
-
-  // MovieBox CDN video relay (binary, needs Range + moviebox Referer) —
-  // handled before the JSON headers below, like proxy-stream.
-  if (pathname === "/api/moviebox/video") {
-    return relayMovieboxVideo(req, res, url);
-  }
-
-  // Hindi/India (animahd) media relay. Its worker rejects any foreign Referer
-  // with a 403, and a browser necessarily sends ours, so the file has to be
-  // fetched server-side too.
-  if (pathname === "/api/india/video") {
-    return relayIndiaVideo(req, res, url);
-  }
-
   // Egress diagnostic (see handleDiag) — answers whether THIS Worker can
   // reach a host, which is the difference between a provider being down and
   // its rejecting our fingerprint.
@@ -1083,29 +570,17 @@ export async function handleAnimeApi(req, res) {
     // Trending should show what is AIRING now. The HiAnime scrape returns all-time
     // popular titles (mostly FINISHED), so prefer a live AniList status:RELEASING
     // query and only fall back to the scrape / static catalog if AniList is unreachable.
-    // 0a. External sources — all fetched CONCURRENTLY and each bounded. The
-    // moviebox GET ladder alone can take ~90s on a cold isolate (netfilm
-    // 429s -> aoneroom retries -> jina reader pacing) and these calls used to
-    // run serially, so the home page answered after 125s+ and every visitor
-    // saw an empty site. A slow source now contributes nothing instead of
-    // holding the page hostage; the fetch keeps running in the background and
-    // warms its own cache for the dedicated endpoints.
+    // The AniList query is bounded so a slow upstream cannot hold the page.
     const withTimeout = (p, ms, fallback) =>
       Promise.race([
         Promise.resolve(p).catch(() => fallback),
         new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
       ]);
 
-    // Budgets are tight on purpose: on a cold Cloudflare isolate these same
-    // sources used to wait out 12-16s caps, so the page answered after ~17s and
-    // every first visitor saw empty rows. Warm calls resolve in 1-3s and never
-    // hit the cap; a cold call now answers within ~6s with fallback data.
-    const [indiaHome, trendingOngoing, hindiHome, movieboxHome] = await Promise.all([
-      withTimeout(fetchIndiaHome(), 5000, { series: [], movies: [] }),
-      withTimeout(getTrendingOngoing(12), 5000, []),
-      withTimeout(fetchHindiHome(), 6000, { series: [], movies: [] }),
-      withTimeout(fetchMovieboxHome(), 6000, null),
-    ]);
+    // Only the AniList ongoing query feeds trending; the Hindi/India and
+    // MovieBox catalogues were removed along with their home rows.
+    const trendingOngoing = await withTimeout(getTrendingOngoing(12), 5000, []);
+
     const trendingSource = trendingOngoing.length > 0
       ? trendingOngoing
       : ((syncedData.trending && syncedData.trending.length > 0)
@@ -1202,88 +677,6 @@ export async function handleAnimeApi(req, res) {
       week: (syncedData.mostPopular && syncedData.mostPopular.length >= 10) ? syncedData.mostPopular.slice(0, 10).map((a, i) => enrichForHiAnime(a, i)) : [...FEATURED_ANIME].reverse().slice(0, 10).map((a, i) => enrichForHiAnime(a, i)),
       month: popular.slice(0, 10).map((a, i) => enrichForHiAnime(a, i))
     };
-
-    // 0b. Hindi India API cards surfaced on the home page under their own buckets.
-    // These are appended to the existing HiAnime-powered rows so both catalogs
-    // appear without disturbing the existing ordering.
-    //
-    // Hindi rows are merged from every reachable Hindi source and deduped by
-    // normalized title so the same show never appears twice:
-    //   1. gokuhd.com — primary Hindi-dubbed catalog (232 series / 62 movies) and
-    //      the only source here that resolves to a directly playable MP4.
-    //   2. MovieBox Hindi anime (Top Anime / Trending Now) — reachable player API,
-    //      used to fill what the primary catalog does not cover.
-    //   3. animahd (already fetched above) — only when both are empty, so the
-    //      rows still work on networks where that domain resolves.
-    function mapMovieboxHindiAnime(item) {
-      if (!item || !item.title) return null;
-      const title = String(item.title).trim();
-      if (!title) return null;
-      const genre = String(item.genre || "").toLowerCase();
-      const badge = String(item.badge || "").toLowerCase();
-      if (!genre.includes("anime") || !badge.includes("hindi")) return null;
-      return {
-        title,
-        image: item.image || "",
-        year: String(item.year || "").trim(),
-        rating: String(item.rating || "").trim(),
-        id: String(item.id || "").trim() || null,
-        slug: String(item.slug || "").trim() || null,
-        type: item.type === "movie" ? "movie" : "series",
-        url: item.slug ? `https://moviebox.ph/watch/${item.slug}` : "",
-      };
-    }
-
-    const gokuSeries = hindiHome?.series || [];
-    const gokuMovies = hindiHome?.movies || [];
-
-    const movieboxHindiSeries = [];
-    const movieboxHindiMovies = [];
-    try {
-      for (const section of movieboxHome?.sections || []) {
-        const target = String(section?.title || "").toLowerCase();
-        if (!target.includes("top anime") && !target.includes("trending now")) continue;
-        for (const it of section?.items || []) {
-          const mapped = mapMovieboxHindiAnime(it);
-          if (!mapped) continue;
-          if (mapped.type === "series") movieboxHindiSeries.push(mapped);
-          else movieboxHindiMovies.push(mapped);
-        }
-      }
-    } catch (e) {
-      // MovieBox is additive; a failure must not take the home page down.
-    }
-
-    const legacySeries = indiaHome?.series?.length ? indiaHome.series : [];
-    const legacyMovies = indiaHome?.movies?.length ? indiaHome.movies : [];
-
-    const indiaSeries = mergeHindiItems(
-      gokuSeries.length ? gokuSeries : legacySeries,
-      movieboxHindiSeries,
-    ).slice(0, 12);
-    const indiaMovies = mergeHindiItems(
-      gokuMovies.length ? gokuMovies : legacyMovies,
-      movieboxHindiMovies,
-    ).slice(0, 12);
-
-    // Hosts that cannot reach gokuhd/animahd (or whose MovieBox home sections
-    // carry no genre/badge metadata) still get Hindi rows from the cached
-    // MovieBox-Hindi catalogue instead of rendering two empty buckets.
-    let finalIndiaSeries = indiaSeries;
-    let finalIndiaMovies = indiaMovies;
-    if (!finalIndiaSeries.length || !finalIndiaMovies.length) {
-      const fallbackRows = await getMovieboxHindiCatalog().catch(() => []);
-      if (!finalIndiaSeries.length) {
-        const seriesRows = fallbackRows.filter((it) => it.type === "series");
-        finalIndiaSeries = (seriesRows.some(looksLikeAnimeItem)
-          ? seriesRows.filter(looksLikeAnimeItem)
-          : seriesRows).slice(0, 12);
-      }
-      if (!finalIndiaMovies.length) {
-        finalIndiaMovies = fallbackRows.filter((it) => it.type === "movie").slice(0, 12);
-      }
-    }
-
     const topUpcomingAnimes = (syncedData.topUpcoming && syncedData.topUpcoming.length > 0)
       ? syncedData.topUpcoming.slice(0, 8)
       : [
@@ -1349,9 +742,6 @@ export async function handleAnimeApi(req, res) {
       latestCompletedAnimes,
       top10Animes,
       topUpcomingAnimes,
-      // Hindi India API buckets surfaced alongside the HiAnime-powered rows.
-      indiaSeriesAnimes: finalIndiaSeries,
-      indiaMovieAnimes: finalIndiaMovies,
       genres: [
         "Action", "Adventure", "Animation", "Boys Love", "Cars", "CGDCT", "Comedy", "Demons", "Detective",
         "Drama", "Ecchi", "Educational", "Fantasy", "Horror", "Isekai", "Magic", "Mecha", "Military",
@@ -1360,869 +750,6 @@ export async function handleAnimeApi(req, res) {
       all: syncedData.allAnime?.length > 0 ? syncedData.allAnime : FEATURED_ANIME
     }));
   }
-
-  // 0x. Hindi India catalog/list/stream endpoints (AnimeWorld-India-Api v1).
-  // Delegated to core/anime-world-india.js so the frontend can paginate/search
-  // the India catalog without touching the existing HiAnime handlers.
-  //
-  // A provider failure must never escape this router. On Node an unhandled
-  // rejection terminates the whole server process, and one dead title page
-  // (a 404 from the source) used to do exactly that. Map "page gone" to 404
-  // and everything else to 502, both as JSON the UI can display.
-  const indiaFail = (err, label) => {
-    const gone = /\b404\b/.test(String((err && err.message) || err || ""));
-    if (!res.headersSent) {
-      res.statusCode = gone ? 404 : 502;
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
-    }
-    return res.end(JSON.stringify({
-      success: false,
-      gone,
-      error: gone
-        ? `${label} is no longer available at the source`
-        : `${label} temporarily unavailable`,
-    }));
-  };
-
-  if (pathname === "/api/india/series") {
-    const page = Math.max(1, parseInt(url.searchParams.get("p") || "1", 10));
-    try {
-      // gokuhd.com is the reachable Hindi-dubbed catalog. animahd is the legacy
-      // source and is only consulted when gokuhd returns nothing.
-      const goku = await fetchHindiSeriesPage(page).catch(() => null);
-      if (goku && goku.items.length) {
-        res.statusCode = 200;
-        return res.end(JSON.stringify({
-          success: true, page,
-          series: goku.items,
-          total: goku.total, totalPages: goku.totalPages,
-        }));
-      }
-      const list = await fetchIndiaSeries(null, { page }).catch(() => []);
-      if (list.length) {
-        // `total`/`totalPages` are additive so the UI can page past the first 24
-        // instead of silently stopping at whatever one request returned.
-        const totals = await fetchIndiaTotals().catch(() => ({ series: 0, movies: 0 }));
-        res.statusCode = 200;
-        return res.end(JSON.stringify({
-          success: true, page, series: list,
-          total: totals.series, totalPages: Math.ceil(totals.series / 24),
-        }));
-      }
-      // gokuhd/animahd unreachable from this host: serve MovieBox's Hindi
-      // catalogue in the same shape so the grid is never empty.
-      if (url.searchParams.get("debug")) {
-        let raw = null;
-        let err = null;
-        try { raw = await searchMoviebox("hindi"); } catch (e) { err = String((e && e.message) || e); }
-        return res.end(JSON.stringify({
-          success: true, page, series: [], total: 0, totalPages: 1,
-          debug: {
-            rawCount: Array.isArray(raw) ? raw.length : null,
-            err,
-            sample: Array.isArray(raw) && raw[0] ? { badge: raw[0].badge, type: raw[0].type, slug: raw[0].slug } : null,
-            helperCached: movieboxHindiFallback.items.length,
-            seedCount: (await getMovieboxLibrarySeed().catch(() => [])).length,
-          },
-        }));
-      }
-      const mboxSeriesRaw = await getMovieboxHindiCatalog("series").catch(() => []);
-      const mboxSeries = mboxSeriesRaw.some(looksLikeAnimeItem)
-        ? mboxSeriesRaw.filter(looksLikeAnimeItem)
-        : mboxSeriesRaw;
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true, page, series: mboxSeries,
-        total: mboxSeries.length, totalPages: Math.max(1, Math.ceil(mboxSeries.length / 24)),
-      }));
-    } catch (e) {
-      return indiaFail(e, "Hindi series list");
-    }
-  }
-
-  if (pathname === "/api/india/movies") {
-    const page = Math.max(1, parseInt(url.searchParams.get("p") || "1", 10));
-    try {
-      const goku = await fetchHindiMoviesPage(page).catch(() => null);
-      if (goku && goku.items.length) {
-        res.statusCode = 200;
-        return res.end(JSON.stringify({
-          success: true, page,
-          movies: goku.items,
-          total: goku.total, totalPages: goku.totalPages,
-        }));
-      }
-      const list = await fetchIndiaMovies(null, { page }).catch(() => []);
-      if (list.length) {
-        const totals = await fetchIndiaTotals().catch(() => ({ series: 0, movies: 0 }));
-        res.statusCode = 200;
-        return res.end(JSON.stringify({
-          success: true, page, movies: list,
-          total: totals.movies, totalPages: Math.max(1, Math.ceil(totals.movies / 24)),
-        }));
-      }
-      const mboxMovies = await getMovieboxHindiCatalog("movie").catch(() => []);
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true, page, movies: mboxMovies,
-        total: mboxMovies.length, totalPages: Math.max(1, Math.ceil(mboxMovies.length / 24)),
-      }));
-    } catch (e) {
-      return indiaFail(e, "Hindi movies list");
-    }
-  }
-
-  // The complete Hindi catalogue (all pages, real totals) — what the library
-  // grid pages through. `type` is all|series|movie.
-  if (pathname === "/api/india/library") {
-    const page = Math.max(1, parseInt(url.searchParams.get("p") || "1", 10));
-    const perPage = Math.max(1, Math.min(100, parseInt(url.searchParams.get("per") || "48", 10)));
-    const type = url.searchParams.get("type") || "all";
-    try {
-      // The reachable gokuhd catalog backs the library grid.
-      const [series, movies] = await Promise.all([
-        type === "movie" ? Promise.resolve(null) : fetchHindiSeriesPage(page).catch(() => null),
-        type === "series" ? Promise.resolve(null) : fetchHindiMoviesPage(page).catch(() => null),
-      ]);
-      const items = [...(series?.items || []), ...(movies?.items || [])];
-      if (items.length) {
-        const total =
-          type === "movie" ? (movies?.total || 0)
-            : type === "series" ? (series?.total || 0)
-              : (series?.total || 0) + (movies?.total || 0);
-        res.statusCode = 200;
-        return res.end(JSON.stringify({
-          success: true,
-          items: items.slice(0, perPage),
-          total,
-          totalPages: Math.max(series?.totalPages || 0, movies?.totalPages || 0, 1),
-          page,
-          type,
-        }));
-      }
-      const data = await fetchIndiaCatalog({ page, perPage, type }).catch(() => null);
-      if (data && (data.items || []).length) {
-        res.statusCode = 200;
-        return res.end(JSON.stringify({ success: true, ...data }));
-      }
-      // Same fallback as /api/india/series: the MovieBox-Hindi catalogue keeps
-      // the library grid usable on hosts where gokuhd/animahd are blocked.
-      const mboxCatalog = await getMovieboxHindiCatalog(type === "series" || type === "movie" ? type : "all").catch(() => []);
-      // The Hindi Anime row is the only consumer of type=series, and the
-      // Hindi pool carries live-action drama too, so that row keeps anime
-      // genres only — with the unfiltered list as a last resort so it can
-      // never come back empty.
-      const mboxItems = type === "series" && mboxCatalog.some(looksLikeAnimeItem)
-        ? mboxCatalog.filter(looksLikeAnimeItem)
-        : mboxCatalog;
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true,
-        items: mboxItems.slice(0, perPage),
-        total: mboxItems.length,
-        totalPages: Math.max(1, Math.ceil(mboxItems.length / perPage)),
-        page,
-        type,
-      }));
-    } catch (e) {
-      res.statusCode = 502;
-      return res.end(JSON.stringify({ success: false, error: "Catalogue unavailable" }));
-    }
-  }
-
-  // Merged Hindi movies: animahd's six + MovieBox's curated movies + the
-  // cartoon movies from search (see getHindiMoviesLibrary above).
-  if (pathname === "/api/india/movies-library") {
-    try {
-      const data = await getHindiMoviesLibrary();
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ success: true, ...data }));
-    } catch (e) {
-      res.statusCode = 502;
-      return res.end(JSON.stringify({ success: false, error: "Movies library unavailable" }));
-    }
-  }
-
-  // Renime (AnimeSalt / WatchAnimeWorld): the other Hindi catalogue the owner
-  // supplied. One JSON shape for search, title info with its episode list, and
-
-  if (pathname === "/api/india/search") {
-    const q = url.searchParams.get("q") || "";
-    const page = Math.max(1, parseInt(url.searchParams.get("p") || "1", 10));
-    if (!q.trim()) {
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ success: false, error: "Missing query parameter" }));
-    }
-    try {
-      // Search the reachable Hindi catalog, then fill gaps with MovieBox's
-      // Hindi anime. mergeHindiItems drops cross-source duplicates by title.
-      const [goku, mbox] = await Promise.all([
-        searchHindi(q, page).catch(() => []),
-        searchMoviebox(q).catch(() => []),
-      ]);
-      const mboxHindi = (mbox || [])
-        .filter((it) => /anime/i.test(String(it.genre || "")) && /hindi/i.test(String(it.badge || "")))
-        .map((it) => ({
-          title: it.title,
-          image: it.image || "",
-          year: String(it.year || ""),
-          rating: String(it.rating || ""),
-          id: String(it.id || ""),
-          slug: it.slug || "",
-          type: it.type === "movie" ? "movie" : "series",
-          url: "",
-        }));
-      let results = mergeHindiItems(goku || [], mboxHindi);
-      if (!results.length) {
-        // goku and the MovieBox search POST are both blocked on some hosts:
-        // title-match the bundled seed catalogue so search still answers
-        // with playable Hindi titles instead of an empty array.
-        const qLower = q.toLowerCase();
-        results = (await getMovieboxHindiCatalog().catch(() => []))
-          .filter((it) => String(it.title || "").toLowerCase().includes(qLower))
-          .slice(0, 24);
-      }
-      if (!results.length) {
-        results = await searchIndia(null, { query: q, page }).catch(() => []);
-      }
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ success: true, query: q, page, results }));
-    } catch (e) {
-      return indiaFail(e, "Hindi search");
-    }
-  }
-
-  if (pathname === "/api/india/seasons") {
-    const seriesID = url.searchParams.get("seriesID") || "";
-    if (!seriesID) {
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ success: false, error: "Missing seriesID parameter" }));
-    }
-    // gokuhd series carry their seasons inside the post itself.
-    if (seriesID.startsWith("goku:")) {
-      const detail = await fetchHindiDetail(seriesID).catch(() => null);
-      // Episode-wise seasons come first: the UI opens the first season, and a
-      // whole-season pack cannot offer anything past episode 1.
-      const [movieboxSeasons, toonSeasons] = await Promise.all([
-        getRealEpisodeSeasons(seriesID).catch(() => []),
-        getToonstreamSeasons(seriesID).catch(() => []),
-      ]);
-      if (!detail) {
-        // gokuhd removed the post, but the bridges match by TITLE, so the
-        // same show can still be listed (and played) from MovieBox or
-        // ToonStream. Only fail when both bridges come back empty too.
-        const covered = new Set(movieboxSeasons.map((s) => String(s.seasonNumber)));
-        const extraSeasons = toonSeasons.filter((s) => !covered.has(String(s.seasonNumber)));
-        const seasons = [...movieboxSeasons, ...extraSeasons];
-        if (seasons.length) {
-          res.statusCode = 200;
-          return res.end(JSON.stringify({
-            success: true,
-            source: "bridge",
-            series: [{
-              seriesId: seriesID,
-              title: seriesID.slice(5).replace(/-/g, " "),
-              poster: "",
-              type: "series",
-            }],
-            seasons,
-          }));
-        }
-        return indiaFail(new Error("404 not found"), "This title");
-      }
-      // Both episode-wise sources usually cover the same season numbers. MovieBox
-      // leads because its episodes are direct MP4 files that start on their own,
-      // while ToonStream's are click-to-play embed pages; where MovieBox covers a
-      // season, ToonStream's copy of it is dropped so "Season 1" never repeats.
-      const covered = new Set(movieboxSeasons.map((s) => String(s.seasonNumber)));
-      const extraSeasons = toonSeasons.filter((s) => !covered.has(String(s.seasonNumber)));
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true,
-        source: []
-          .filter(Boolean)
-          .join("+"),
-        series: [{
-          seriesId: seriesID,
-          title: detail.title,
-          poster: detail.poster,
-          year: detail.year,
-          rating: detail.rating,
-          totalSeasons: String(detail.seasons.length),
-          description: detail.description,
-          genres: detail.genres,
-          languages: detail.languages,
-          type: detail.type,
-        }],
-        // Episode-wise seasons first (MovieBox, then ToonStream), pack seasons
-        // last and named distinctly so one title never lists two "Season 1" rows.
-        seasons: [
-          ...movieboxSeasons,
-          ...extraSeasons,
-          ...detail.seasons.map((s) => ({ ...s, seasonName: `${s.seasonName} · Full pack` })),
-        ],
-      }));
-    }
-
-    // MovieBox-sourced title: one synthetic season; playback bridges to the
-    // reachable MovieBox player API in /api/india/stream.
-    const mboxId = /^(?:moviebox:)?(\d{10,})$/.exec(seriesID);
-    if (mboxId) {
-      const map = await getMovieboxIdMap();
-      const entry = map.get(mboxId[1]);
-      if (!entry) return indiaFail(new Error("404 not found"), "This title");
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true,
-        series: [{ seriesId: seriesID, title: entry.title, poster: entry.image || "", url: "" }],
-        seasons: [{
-          seasonNumber: "1",
-          seasonName: "Season 1",
-          episodes: "",
-          seasonId: `moviebox:${mboxId[1]}~S1`,
-          url: "",
-        }],
-      }));
-    }
-
-    let data;
-    try {
-      data = await fetchIndiaSeasons(null, { seriesID });
-    } catch (e) {
-      return indiaFail(e, "This title");
-    }
-    if (!data) return indiaFail(new Error("404 not found"), "This title");
-    res.statusCode = 200;
-    return res.end(JSON.stringify({ success: true, ...data }));
-  }
-
-  if (pathname === "/api/india/episodes") {
-    const seasonId = url.searchParams.get("seasonId") || "";
-    if (!seasonId) {
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ success: false, error: "Missing seasonId parameter" }));
-    }
-    if (seasonId.startsWith("goku:")) {
-      const [slug, seasonPart] = seasonId.slice(5).split("~");
-      const seasonNum = /^S(\d{1,2})$/i.exec(seasonPart || "")?.[1] || null;
-      const data = await fetchHindiEpisodes(slug, seasonNum).catch(() => null);
-      if (!data || !(data.episodes || []).length) {
-        // Dead/rotted post: bridge to the same show's episode-wise sources.
-        // MovieBox leads (direct MP4s); ToonStream covers what it doesn't.
-        const mbox = await getRealEpisodeSeasons(slug).catch(() => []);
-        const toon = mbox.length ? [] : await getToonstreamSeasons(slug).catch(() => []);
-        const bridged = mbox.length ? mbox : toon;
-        if (bridged.length) {
-          res.statusCode = 200;
-          return res.end(JSON.stringify({ success: true, seasonId, bridged: true, seasons: bridged, episodes: [] }));
-        }
-        return indiaFail(new Error("404 not found"), "These episodes");
-      }
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true,
-        seasonId,
-        seasonUrl: data.seasonUrl,
-        episodes: data.episodes,
-      }));
-    }
-
-    // ToonStream episode list (real per-episode source).
-    const toonSeason = /^toon:([a-z0-9-]+)~S(\d{1,2})$/i.exec(seasonId);
-    if (toonSeason) {
-      const data = await fetchToonstreamEpisodes(toonSeason[1], Number(toonSeason[2])).catch(() => null);
-      if (!data?.episodes?.length) return indiaFail(new Error("404 not found"), "These episodes");
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true,
-        seasonId,
-        episodes: data.episodes.map((e) => ({
-          episodeId: `toon:${toonSeason[1]}~S${e.season}~E${e.episode}`,
-          title: e.title || `Episode ${e.episode}`,
-          episodeNumber: String(e.episode),
-          image: e.image || "",
-        })),
-      }));
-    }
-
-    const mboxSeason = /^moviebox:(\d{10,})(?:~S(\d{1,2}))?/.exec(seasonId);
-    if (mboxSeason) {
-      const map = await getMovieboxIdMap();
-      const entry = map.get(mboxSeason[1]);
-      if (!entry) return indiaFail(new Error("404 not found"), "These episodes");
-
-      // A season id from a series enumerates the episodes that exist; a movie
-      // (or an id without a season) keeps the single playable entry.
-      const seasonNum = Number(mboxSeason[2]) || 0;
-      if (seasonNum && entry.slug) {
-        const detail = await fetchMovieboxDetail(entry.slug).catch(() => null);
-        const season = (detail?.seasons || []).find((s) => s.se === seasonNum);
-        const listed = (season?.allEp || []).length ? season.allEp : null;
-        const numbers = listed || (season?.maxEp ? Array.from({ length: Math.min(season.maxEp, 2000) }, (_, i) => i + 1) : []);
-        if (numbers.length) {
-          res.statusCode = 200;
-          return res.end(JSON.stringify({
-            success: true,
-            seasonId,
-            episodes: numbers.map((n) => ({
-              episodeId: `moviebox:${mboxSeason[1]}~S${seasonNum}~E${n}`,
-              title: `Episode ${n}`,
-              episodeNumber: String(n),
-              image: entry.image || detail?.image || "",
-            })),
-          }));
-        }
-      }
-
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true,
-        seasonId,
-        episodes: [{
-          episodeId: `moviebox:${mboxSeason[1]}`,
-          title: entry.title || "Episode 1",
-          episodeNumber: "1",
-          image: entry.image || "",
-        }],
-      }));
-    }
-
-    let data;
-    try {
-      data = await fetchIndiaEpisodes(null, { seasonId });
-    } catch (e) {
-      return indiaFail(e, "These episodes");
-    }
-    if (!data) return indiaFail(new Error("404 not found"), "These episodes");
-    res.statusCode = 200;
-    return res.end(JSON.stringify({ success: true, ...data }));
-  }
-
-  if (pathname === "/api/india/stream") {
-    const episodeId = url.searchParams.get("episodeId") || "";
-    const movieId = url.searchParams.get("movieId") || "";
-    if (!episodeId && !movieId) {
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ success: false, error: "Missing episodeId or movieId parameter" }));
-    }
-
-    const requestedId = String(episodeId || movieId).trim();
-
-    // 1. gokuhd titles: nexdrive -> fastdl -> direct MP4 (primary playable path with quick cap).
-    if (requestedId.startsWith("goku:")) {
-      const resolved = await Promise.race([
-        resolveHindiStream(episodeId, movieId),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3500)),
-      ]).catch(() => null);
-      if (resolved) {
-        res.statusCode = 200;
-        return res.end(JSON.stringify(resolved));
-      }
-
-      // goku's file hosts rotate between fastdl.* and nexdrive.*, and old posts
-      // whose drives all landed on the parked nexdrive.fit domain resolve
-      // nowhere. Before failing, bridge to MovieBox's copy of the same title —
-      // the same title matching the episode lists already use for these posts.
-      const gokuRef = /^goku:([a-z0-9-]+)(?:~S(\d{1,2}))?(?:~(\d{1,4}))?$/i.exec(requestedId);
-      const gokuSlug = gokuRef?.[1] || "";
-      const gokuSeason = Number(gokuRef?.[2]) || 1;
-      const gokuEpParam = gokuRef?.[3] ? Number(gokuRef[3]) : null;
-      const wantsGokuMovie = Boolean(movieId) && !episodeId;
-
-      let epNum = 1;
-      if (!wantsGokuMovie) {
-        if (gokuEpParam !== null && gokuEpParam > 0) {
-          epNum = gokuEpParam;
-        } else {
-          const epInName = /(?:episode|ep)[\s-]*(\d{1,3})/i.exec(requestedId);
-          if (epInName) epNum = Number(epInName[1]) || 1;
-        }
-      }
-
-      // Fast net: ToonStream (fully accessible and fast from Cloudflare Workers for series and movies).
-      if (gokuSlug) {
-        try {
-          const toon = await findToonstreamForGoku(gokuSlug).catch(() => null);
-          if (toon?.slug) {
-            const pick = await fetchBestToonstreamServer(toon.slug, wantsGokuMovie ? 1 : (gokuSeason || 1), epNum).catch(() => null);
-            if (pick?.primary) {
-              res.statusCode = 200;
-              return res.end(JSON.stringify({
-                success: true,
-                type: wantsGokuMovie ? "movie" : "episode",
-                title: toon.title,
-                season: wantsGokuMovie ? 1 : (gokuSeason || 1),
-                episode: epNum,
-                stream: pick.primary.embedUrl,
-                streams: [{ url: "", embedUrl: pick.primary.embedUrl, server: "Mirror", type: "embed" }],
-              }));
-            }
-          }
-        } catch {}
-      }
-
-      // Second net: MovieBox (with timeout cap & embed support)
-      if (gokuSlug) {
-        const match = await findMovieboxEpisodeSource(gokuSlug, wantsGokuMovie ? "movie" : "series").catch(() => null);
-        if (match) {
-          try {
-            const streamPromise = fetchMovieboxStream({
-              subjectId: match.id,
-              detailPath: match.slug,
-              se: wantsGokuMovie ? 0 : gokuSeason,
-              ep: wantsGokuMovie ? 0 : epNum,
-            });
-            const streamData = await Promise.race([
-              streamPromise,
-              new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
-            ]).catch(() => null);
-            if (streamData?.sources?.length || streamData?.embedUrl) {
-              const streams = (streamData.sources || []).map((s) => ({
-                url: s.url,
-                quality: s.resolution ? `${s.resolution}p` : "",
-                label: s.resolution ? `${s.resolution}p` : "MP4",
-                server: "Mirror",
-                type: "mp4",
-                embedUrl: streamData.embedUrl || "",
-              }));
-              if (streamData.embedUrl) {
-                // The embed goes last: the MovieBox web player opens its
-                // "Please log in before payment" modal, so it may only appear
-                // as a failover after every direct file has failed.
-                streams.push({
-                  url: "",
-                  embedUrl: streamData.embedUrl,
-                  server: "Mirror (Embed)",
-                  type: "embed",
-                });
-              }
-              res.statusCode = 200;
-              return res.end(JSON.stringify({
-                success: true,
-                type: wantsGokuMovie ? "movie" : "episode",
-                title: match.title,
-                stream: streams[0].embedUrl || streams[0].url,
-                streams: [streams[0]],
-                fallbacks: streams.slice(1),
-              }));
-            }
-          } catch {}
-        }
-      }
-
-      return indiaFail(new Error("404 not found"), "These stream links");
-    }
-
-    // 2. ToonStream episodes answer with embed players. Each candidate is
-    //    checked server-side, so the player gets one source that plays and keeps
-    //    the rest as silent failover rather than a list of dead mirrors. No
-    //    source/site labels are returned — the only player-facing name is a
-    //    neutral mirror label.
-    if (requestedId.startsWith("toon:")) {
-      const ref = /^toon:([a-z0-9-]+)~S(\d{1,2})~E(\d{1,4})$/i.exec(requestedId);
-      if (!ref) return indiaFail(new Error("404 not found"), "These stream links");
-      const pick = await fetchBestToonstreamServer(ref[1], Number(ref[2]), Number(ref[3])).catch(() => null);
-      const primary = pick?.primary;
-      if (!primary) return indiaFail(new Error("404 not found"), "These stream links");
-
-      const toStream = (s, verified) => {
-        return {
-          url: "",
-          embedUrl: s.embedUrl,
-          server: verified ? `Mirror 1` : `Mirror 2`,
-          type: "embed",
-        };
-      };
-
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true,
-        type: "episode",
-        season: Number(ref[2]),
-        episode: Number(ref[3]),
-        stream: primary.embedUrl,
-        streams: toStream(primary, Boolean(pick?.probed)),
-      }));
-    }
-
-    // 3. MovieBox-sourced titles bridge to the reachable MovieBox player API
-    //    (the moviebox.ph website itself is DNS-blocked here, the API is not).
-    const mboxId = /^(?:moviebox:)?(\d{10,})(?:~S(\d{1,2}))?(?:~E(\d{1,4}))?$/.exec(requestedId);
-    if (mboxId) {
-      try {
-        const map = await getMovieboxIdMap();
-        const entry = map.get(mboxId[1]);
-        if (entry) {
-          const seasonNum = Number(mboxId[2]) || 0;
-          const episodeNum = Number(mboxId[3]) || 0;
-          // A film plays with se=0&ep=0; a series episode needs its own se/ep,
-          // which is why the season and episode ride along in the episode id.
-          const isMovie = entry.type === "movie" || (Boolean(movieId) && !episodeId && !seasonNum);
-          const streamData = await fetchMovieboxStream({
-            subjectId: mboxId[1],
-            detailPath: entry.slug,
-            se: isMovie ? 0 : seasonNum || 1,
-            ep: isMovie ? 0 : episodeNum || 1,
-          });
-          if (streamData?.sources?.length || streamData?.embedUrl) {
-            const streams = (streamData.sources || []).map((s) => ({
-              url: s.url,
-              quality: s.resolution ? `${s.resolution}p` : "",
-              label: s.resolution ? `${s.resolution}p` : "MP4",
-              server: "Mirror",
-              type: "mp4",
-            }));
-            // The video CDN rejects some hosting providers' egress (Render
-            // answers 426, Cloudflare Workers 427), so on those hosts every
-            // MP4 mirror dies while the embed player — loaded in the viewer's
-            // own browser — still plays. Keep it as the final failover target
-            // so playback survives wherever the relay hop is blocked.
-            if (streamData.embedUrl) {
-              // The embed is the final failover only: the MovieBox web player
-              // opens its "Please log in before payment" modal, so the direct
-              // MP4 mirrors must lead and the player page is kept for hosts
-              // whose egress the CDN rejects outright.
-              streams.push({
-                url: "",
-                embedUrl: streamData.embedUrl,
-                label: "MovieBox Player (Embed)",
-                server: "MovieBox Player (Embed)",
-                type: "embed",
-              });
-            }
-            if (!streams.length) return indiaFail(new Error("404 not found"), "These stream links");
-            // One player, best quality first: the other resolutions stay as
-            // silent fallbacks instead of a server list to choose from.
-            res.statusCode = 200;
-            return res.end(JSON.stringify({
-              success: true,
-              type: isMovie ? "movie" : "episode",
-              title: entry.title,
-              stream: streams[0].embedUrl || streams[0].url,
-              streams: [streams[0]],
-              fallbacks: streams.slice(1),
-            }));
-          }
-        }
-      } catch (e) {
-        // Fall through to the legacy animahd resolver below.
-      }
-    }
-
-    // 3. Legacy animahd titles — unreachable on DNS-blocked networks, kept for
-    //    deployments where the domain resolves.
-    let data;
-    try {
-      data = await fetchIndiaStream(null, { episodeId, movieId });
-    } catch (e) {
-      return indiaFail(e, "These stream links");
-    }
-    if (!data) return indiaFail(new Error("404 not found"), "These stream links");
-    res.statusCode = 200;
-    return res.end(JSON.stringify({ success: true, ...data }));
-  }
-
-  // 0y. MovieBox catalog/detail/stream endpoints (Node port of Moviebox-API).
-  const movieboxFail = (e, label) => {
-    console.error(`[moviebox] ${label} failed:`, (e && e.stack) || e);
-    if (!res.headersSent) {
-      res.statusCode = 502;
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
-    }
-    // ?debug=1 surfaces the upstream reason (relay/reader diagnostics).
-    const detail = url.searchParams.get("debug")
-      ? ` (${String((e && e.message) || e).slice(0, 200)})`
-      : "";
-    return res.end(JSON.stringify({ success: false, error: `${label} unavailable${detail}` }));
-  };
-
-  if (pathname === "/api/moviebox/home") {
-    // Instant response with background revalidation: return durable catalog immediately.
-    let durableHome = null;
-    try { durableHome = await readDoc("moviebox-home-stale", null); } catch {}
-    if (durableHome && durableHome.data) {
-      if (!movieboxHomeRefreshing && Date.now() - (durableHome.at || 0) > 6 * 3600 * 1000) {
-        movieboxHomeRefreshing = true;
-        Promise.race([fetchMovieboxHome(), movieboxCap(15000, "background catalog")])
-          .then((data) => {
-            if (data) {
-              movieboxHomeStale.data = data;
-              movieboxHomeStale.at = Date.now();
-              return writeDoc("moviebox-home-stale", { at: movieboxHomeStale.at, data });
-            }
-          })
-          .catch(() => {})
-          .finally(() => { movieboxHomeRefreshing = false; });
-      }
-      res.statusCode = 200;
-      return res.end(JSON.stringify({
-        success: true,
-        ...durableHome.data,
-        cached: true,
-        staleAgeMs: Date.now() - (durableHome.at || 0),
-      }));
-    }
-    // The MovieBox GET ladder (netfilm 429s -> aoneroom retries -> jina reader
-    // pacing) is unbounded and can run for a minute on a cold isolate. Cap the
-    // response, and when the cap or an upstream error hits, serve the last
-    // good catalog instead of an error row.
-    try {
-      const data = await Promise.race([fetchMovieboxHome(), movieboxCap(undefined, "catalog")]);
-      movieboxHomeStale.data = data;
-      movieboxHomeStale.at = Date.now();
-      // Durable copy: workers.dev runs many isolates, and a per-isolate
-      // stale copy cannot help a cold one — D1 can.
-      writeDoc("moviebox-home-stale", { at: movieboxHomeStale.at, data }).catch(() => {});
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ success: true, ...data }));
-    } catch (e) {
-      if (movieboxHomeStale.data) {
-        res.statusCode = 200;
-        return res.end(JSON.stringify({
-          success: true,
-          ...movieboxHomeStale.data,
-          stale: true,
-          staleAgeMs: Date.now() - movieboxHomeStale.at,
-        }));
-      }
-      try {
-        const durable = await readDoc("moviebox-home-stale", null);
-        if (durable && durable.data) {
-          movieboxHomeStale.data = durable.data;
-          movieboxHomeStale.at = durable.at || 0;
-          res.statusCode = 200;
-          return res.end(JSON.stringify({
-            success: true,
-            ...durable.data,
-            stale: true,
-            staleAgeMs: Date.now() - (durable.at || 0),
-          }));
-        }
-      } catch {}
-      return movieboxFail(e, "Catalog");
-    }
-  }
-
-  if (pathname === "/api/moviebox/list") {
-    const tab = Math.max(1, parseInt(url.searchParams.get("tab") || "2", 10));
-    const page = Math.max(1, parseInt(url.searchParams.get("p") || "1", 10));
-    const listKey = `${tab}:${page}`;
-    try {
-      const items = await Promise.race([fetchMovieboxList(tab, page), movieboxCap(undefined, "list")]);
-      movieboxListStale.set(listKey, items);
-      if (movieboxListStale.size > 30) {
-        const oldest = movieboxListStale.keys().next().value;
-        if (oldest !== undefined) movieboxListStale.delete(oldest);
-      }
-      writeDoc(`moviebox-list-${tab}-${page}`, { at: Date.now(), items }).catch(() => {});
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ success: true, tab, page, items }));
-    } catch (e) {
-      const hit = movieboxListStale.get(listKey);
-      if (hit) {
-        res.statusCode = 200;
-        return res.end(JSON.stringify({ success: true, tab, page, items: hit, stale: true }));
-      }
-      try {
-        const durable = await readDoc(`moviebox-list-${tab}-${page}`, null);
-        if (durable && durable.items) {
-          movieboxListStale.set(listKey, durable.items);
-          res.statusCode = 200;
-          return res.end(JSON.stringify({ success: true, tab, page, items: durable.items, stale: true }));
-        }
-      } catch {}
-      return movieboxFail(e, "Catalog list");
-    }
-  }
-
-  if (pathname === "/api/moviebox/search") {
-    const q = url.searchParams.get("q") || "";
-    if (!q.trim()) {
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ success: false, error: "Missing query parameter" }));
-    }
-    const queryKey = q.trim().toLowerCase().replace(/\s+/g, " ");
-    let items = [];
-    try {
-      items = await Promise.race([searchMoviebox(q), movieboxCap(6000, "search")]).catch(() => []);
-    } catch {}
-
-    if (!items || !items.length) {
-      const hit = movieboxSearchStale.get(queryKey);
-      if (hit && hit.length) items = hit;
-    }
-
-    if (!items || !items.length) {
-      let lib = movieboxHomeStale?.data?.library || [];
-      if (!lib.length) {
-        try {
-          const durable = await readDoc("moviebox-home-stale", null);
-          if (durable && durable.data && Array.isArray(durable.data.library)) {
-            lib = durable.data.library;
-          }
-        } catch {}
-      }
-      if (lib.length) {
-        items = lib.filter((it) => {
-          const t = String(it.title || "").toLowerCase();
-          return t.includes(queryKey);
-        });
-      }
-    }
-
-    if (items && items.length) {
-      movieboxSearchStale.set(queryKey, items);
-      if (movieboxSearchStale.size > 20) {
-        const oldest = movieboxSearchStale.keys().next().value;
-        if (oldest !== undefined) movieboxSearchStale.delete(oldest);
-      }
-    }
-
-    res.statusCode = 200;
-    return res.end(JSON.stringify({ success: true, query: q, items: items || [] }));
-  }
-
-  if (pathname === "/api/moviebox/detail") {
-    const slug = url.searchParams.get("slug") || "";
-    if (!slug) {
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ success: false, error: "Missing slug parameter" }));
-    }
-    try {
-      const detail = await fetchMovieboxDetail(slug);
-      if (!detail) {
-        res.statusCode = 404;
-        return res.end(JSON.stringify({ success: false, error: "Title not found" }));
-      }
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ success: true, detail }));
-    } catch (e) {
-      return movieboxFail(e, "Title");
-    }
-  }
-
-  if (pathname === "/api/moviebox/stream") {
-    const subjectId = url.searchParams.get("subjectId") || "";
-    const detailPath = url.searchParams.get("path") || "";
-    const se = parseInt(url.searchParams.get("se") ?? "1", 10);
-    const ep = parseInt(url.searchParams.get("ep") ?? "1", 10);
-    if (!subjectId || !detailPath) {
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ success: false, error: "Missing subjectId or path" }));
-    }
-    try {
-      const data = await fetchMovieboxStream({ subjectId, detailPath, se, ep });
-      if (!data || (!data.sources?.length && !data.embedUrl)) {
-        res.statusCode = 200;
-        return res.end(JSON.stringify({ success: false, hasResource: false, error: "No stream for this episode" }));
-      }
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ success: true, ...data }));
-    } catch (e) {
-      return movieboxFail(e, "Stream");
-    }
-  }
-
   // 1. Catalog Endpoint
   if (pathname === "/api/anime/catalog") {
 
@@ -2244,11 +771,44 @@ export async function handleAnimeApi(req, res) {
   // 2. Search Endpoint (AniList + HiAnime/9Anime Synced Catalog)
   if (pathname === "/api/anime/search") {
     const q = url.searchParams.get("q") || "";
+    const animeSearchKey = q.trim().toLowerCase().replace(/\s+/g, " ");
+    const freshAnimeHit = animeSearchCache.get(animeSearchKey);
+    if (freshAnimeHit && Date.now() - freshAnimeHit.at < animeSearchCacheTtl) {
+      res.statusCode = 200;
+      return res.end(JSON.stringify(freshAnimeHit.data));
+    }
     try {
-      const [anilistResults, syncedResults] = await Promise.all([
+      // Three catalogues, in parallel: AniList (rich metadata), the synced
+      // HiAnime snapshot (345 rows) and HiAnime's LIVE search. The snapshot
+      // alone was what search showed for HiAnime, so any title the six
+      // snapshot categories did not cover ("Bleach" came back with 4 results
+      // while the live site had 18) simply did not exist on this page.
+      // Page 2 is worth a short race: popular queries ("one piece") have one,
+      // but the request must never hold the answer for its full timeout.
+      const [anilistResults, syncedResults, hisearch1, hisearch2] = await Promise.all([
         searchAnime(q).catch(() => []),
-        Promise.resolve(searchSyncedAnime(q)).catch(() => [])
+        Promise.resolve(searchSyncedAnime(q)).catch(() => []),
+        searchHiAnime(q, 1).catch(() => []),
+        Promise.race([
+          searchHiAnime(q, 2).catch(() => []),
+          new Promise((resolve) => setTimeout(() => resolve([]), 3000)),
+        ]),
       ]);
+      // HiAnime rows carry { id, title, poster } with a string title; rewrite
+      // them to the AniList-ish shape the grid and ranker already handle, and
+      // tag the source so the player resolves the HiAnime id instead of
+      // guessing it is an AniList id.
+      const hianimeResults = [...(hisearch1 || []), ...(hisearch2 || [])].map((r) => ({
+        id: String(r.id),
+        hianimeId: String(r.id),
+        title: { english: r.title || "", romaji: r.title || "" },
+        titleStr: r.title || "",
+        coverImage: { extraLarge: r.poster || "", large: r.poster || "" },
+        poster: r.poster || "",
+        episodes: 0,
+        seasonYear: 0,
+        source: "hianime",
+      }));
       // The two catalogs use different ids for the same show (AniList id vs
       // HiAnime id), so an id-only dedupe let duplicates through and left the
       // exact match buried behind loosely-related titles. Match on the
@@ -2280,7 +840,7 @@ export async function handleAnimeApi(req, res) {
         return 4;
       };
       const byTitle = new Map();
-      for (const item of [...anilistResults, ...syncedResults]) {
+      for (const item of [...anilistResults, ...syncedResults, ...hianimeResults]) {
         const k = norm(titleOf(item));
         if (!k) continue;
         const prev = byTitle.get(k);
@@ -2288,9 +848,25 @@ export async function handleAnimeApi(req, res) {
       }
       const results = [...byTitle.values()]
         .sort((a, b) => rank(a) - rank(b) || scoreOf(b) - scoreOf(a))
-        .slice(0, 40);
+        .slice(0, 60);
+      const payload = { query: q, count: results.length, results };
+      // ?debug=1 shows what each catalogue contributed before the title merge;
+      // without it a deployed Worker only shows the final list.
+      if (url.searchParams.get("debug") === "1") {
+        payload.trace = {
+          anilist: (anilistResults || []).length,
+          synced: (syncedResults || []).length,
+          hianime: hianimeResults.length,
+          merged: byTitle.size,
+        };
+      }
+      animeSearchCache.set(animeSearchKey, { at: Date.now(), data: payload });
+      if (animeSearchCache.size > 120) {
+        const oldest = animeSearchCache.keys().next().value;
+        if (oldest !== undefined) animeSearchCache.delete(oldest);
+      }
       res.statusCode = 200;
-      return res.end(JSON.stringify({ query: q, count: results.length, results }));
+      return res.end(JSON.stringify(payload));
     } catch (err) {
       res.statusCode = 500;
       return res.end(JSON.stringify({ error: err.message, results: [] }));
@@ -2320,9 +896,40 @@ export async function handleAnimeApi(req, res) {
         return res.end(JSON.stringify({ anime: matchedSynced }));
       }
 
-      // 3. Fallback to AniList by ID
+      // 3. A live-HiAnime search row carries a HiAnime id in the `id` field.
+      // Looking that up on AniList could resolve an unrelated show (the same
+      // numeric collision that once made MovieBox cards play the wrong title),
+      // so the source tag short-circuits straight to a HiAnime record.
+      const source = String(url.searchParams.get("source") || "");
+      const hintedTitle = String(url.searchParams.get("title") || "").trim();
+      const hianimeShim = () => {
+        const title = hintedTitle || `Anime #${id}`;
+        return {
+          id: String(id),
+          hianimeId: String(id),
+          title: { english: title, romaji: title },
+          titleStr: title,
+          poster: "",
+          coverImage: {},
+          episodes: 0,
+          seasonYear: 0,
+          source: "hianime",
+        };
+      };
+      if (source === "hianime") {
+        res.statusCode = 200;
+        return res.end(JSON.stringify({ anime: hianimeShim() }));
+      }
+
+      // 4. Fallback to AniList by ID
       const anime = await getAnimeById(id);
+      // 5. AniList has nothing for this id but it is a bare HiAnime id (its
+      // search results are the only catalogue that carried it): answer with a
+      // minimal record so the click opens instead of silently doing nothing.
       res.statusCode = 200;
+      if (!anime && /^\d+$/.test(String(id))) {
+        return res.end(JSON.stringify({ anime: hianimeShim() }));
+      }
       return res.end(JSON.stringify({ anime }));
     } catch (err) {
       res.statusCode = 500;
@@ -2475,7 +1082,15 @@ export async function handleAnimeApi(req, res) {
     if (streamCache.has(cacheKey)) {
       const cached = streamCache.get(cacheKey);
       const hasDirectHls = Array.isArray(cached?.data?.streams) && cached.data.streams.some(s => s.type === "hls");
-      if (hasDirectHls && (Date.now() - cached.timestamp < 1000 * 60 * 10)) {
+      // HLS payloads keep a long TTL; embed-only ones a short one. Resolving
+      // an episode takes ~10-20s of chained upstreams when nothing is cached,
+      // and the old read-gate (HLS only) re-ran the whole chain for every
+      // replay of an episode that resolved to its embed mirror — the
+      // "clicked a series and it loads forever" case. An embed payload is
+      // still the truth for 3 minutes; a stale cache is ignored so a
+      // newly-failing extraction gets re-attempted.
+      const cachedTtlMs = hasDirectHls ? (1000 * 60 * 10) : (1000 * 60 * 3);
+      if (Date.now() - cached.timestamp < cachedTtlMs) {
         res.statusCode = 200;
         // Sanitise on read as well: a payload cached before the English-only
         // rule must never stream other languages.
@@ -3295,6 +1910,94 @@ Episode streaming with English Captions [CC] enabled.
     return res.end(JSON.stringify({ success: true, removed: id, total: saved.length }));
   }
 
+  // --- Owner-uploaded titles backed by Mux embeds ---
+  // Public read: the home rows and player only need the published list.
+  if (pathname === "/api/mux/content" && req.method === "GET") {
+    const items = (await readDoc("mux-content", [])) || [];
+    res.statusCode = 200;
+    return res.end(JSON.stringify({ success: true, items, total: items.length }));
+  }
+
+  // Create / update (owner portal token required).
+  if (pathname === "/api/mux/content" && req.method === "POST") {
+    if (!requirePortalAuth(req, url, res)) return;
+
+    let body = {};
+    try {
+      body = JSON.parse((await readRequestBody(req)) || "{}");
+    } catch (e) {
+      body = {};
+    }
+
+    const title = String(body.title || "").trim().slice(0, 200);
+    if (!title) {
+      res.statusCode = 400;
+      return res.end(JSON.stringify({ success: false, error: "A title is required" }));
+    }
+
+    const type = body.type === "movie" ? "movie" : "series";
+    const rawEps = Array.isArray(body.episodes) ? body.episodes : [];
+    const episodes = [];
+    for (const ep of rawEps.slice(0, 500)) {
+      const enc = muxEmbedFor(ep && (ep.embed || ep.embedUrl || ep.playbackId));
+      if (!enc) continue;
+      episodes.push({
+        ep: Number(ep.ep) || episodes.length + 1,
+        title: String(ep.title || "").trim().slice(0, 200),
+        playbackId: enc.playbackId,
+        embedUrl: enc.embedUrl,
+      });
+    }
+    if (!episodes.length) {
+      res.statusCode = 400;
+      return res.end(JSON.stringify({ success: false, error: "At least one Mux playback ID or embed URL is required" }));
+    }
+    episodes.sort((a, b) => a.ep - b.ep);
+
+    const existing = (await readDoc("mux-content", [])) || [];
+    const id = String(body.id || "").trim() || `mux_${Date.now().toString(36)}_${crypto.randomBytes(3).toString("hex")}`;
+    const record = {
+      id,
+      title,
+      type,
+      image: String(body.image || "").trim().slice(0, 600),
+      year: String(body.year || "").trim().slice(0, 10),
+      genre: String(body.genre || "").trim().slice(0, 80),
+      description: String(body.description || "").trim().slice(0, 2000),
+      episodes,
+      updatedAt: Date.now(),
+    };
+
+    const idx = existing.findIndex((it) => it && it.id === id);
+    let saved;
+    if (idx >= 0) {
+      record.createdAt = existing[idx].createdAt || Date.now();
+      saved = existing.slice();
+      saved[idx] = record;
+    } else {
+      record.createdAt = Date.now();
+      saved = [record, ...existing];
+    }
+    await writeDoc("mux-content", saved);
+
+    res.statusCode = 200;
+    return res.end(JSON.stringify({ success: true, item: record, total: saved.length }));
+  }
+
+  if (pathname === "/api/mux/content" && req.method === "DELETE") {
+    if (!requirePortalAuth(req, url, res)) return;
+    const id = url.searchParams.get("id") || "";
+    const existing = (await readDoc("mux-content", [])) || [];
+    const next = existing.filter((it) => it && it.id !== id);
+    if (next.length === existing.length) {
+      res.statusCode = 404;
+      return res.end(JSON.stringify({ success: false, error: "Title not found" }));
+    }
+    await writeDoc("mux-content", next);
+    res.statusCode = 200;
+    return res.end(JSON.stringify({ success: true, removed: id, total: next.length }));
+  }
+
   if (pathname === "/api/feedback/auto-fix-all") {
     if (!requirePortalAuth(req, url, res)) return;
     const list = await getFeedbackList();
@@ -3537,7 +2240,7 @@ Episode streaming with English Captions [CC] enabled.
   }
 
   // 19. Community Comments API (Get & Post) — served on both paths.
-  if (pathname === "/api/anime/comments" || pathname === "/api/moviebox/comments") {
+  if (pathname === "/api/anime/comments") {
     if (req.method === "POST") {
       let body = {};
       try {
@@ -3622,18 +2325,25 @@ async function handleProxyStream(req, res, url) {
       headers["Range"] = req.headers.range;
     }
 
+    // The timeout covers getting the response headers, not the body: a
+    // segment or file that is still arriving when the timer fires used to be
+    // cut mid-stream, which ends as ERR_CONTENT_LENGTH_MISMATCH in the player
+    // and a "buffering too long" failover.
+    const fetchHeaders = async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(targetUrl, { headers, signal: controller.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+    };
     let response;
     try {
-      response = await fetch(targetUrl, {
-        headers,
-        signal: AbortSignal.timeout(timeoutMs)
-      });
+      response = await fetchHeaders();
     } catch (firstErr) {
       // Retry once if first attempt timed out
-      response = await fetch(targetUrl, {
-        headers,
-        signal: AbortSignal.timeout(timeoutMs)
-      });
+      response = await fetchHeaders();
     }
 
     if (!response.ok && response.status !== 206) {
@@ -3848,12 +2558,14 @@ async function handleDiag(req, res, url) {
 
     // Read at most ~1 KB of the body — enough to tell a challenge page from
     // real JSON from video bytes — then cancel the stream so a huge file is
-    // never pulled into the isolate.
+    // never pulled into the isolate. `n` raises the cap (capped at 32 KB) for
+    // diagnosing an upstream page whose markup is what went wrong.
+    const cap = Math.min(Math.max(Number(url.searchParams.get("n")) || 1024, 1024), 32768);
     if (method !== "HEAD" && upstream.body) {
       const reader = upstream.body.getReader();
       const chunks = [];
       let got = 0;
-      while (got < 1024) {
+      while (got < cap) {
         const { done, value } = await reader.read();
         if (done) break;
         chunks.push(value);
@@ -3864,7 +2576,7 @@ async function handleDiag(req, res, url) {
       } catch {}
       const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
       out.bytesRead = buf.length;
-      out.head = buf.subarray(0, 300).toString("utf8");
+      out.head = cap > 1024 ? buf.subarray(0, cap).toString("utf8") : buf.subarray(0, 300).toString("utf8");
     }
     out.success = true;
   } catch (err) {

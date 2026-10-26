@@ -22,12 +22,10 @@ export default async function handler(req, res) {
   const pathname = req.url.split("?")[0];
 
 
-  // 1. Anime streaming, HiAnime & India catalogs, MovieBox, manga, user
-  // progress, feedback and notice endpoints.
+  // 1. Anime streaming, HiAnime, manga, user progress, feedback and notices.
   if (
     pathname.startsWith("/api/anime/") ||
-    pathname.startsWith("/api/india/") ||
-    pathname.startsWith("/api/moviebox/") ||
+    pathname.startsWith("/api/mux/") ||
     pathname.startsWith("/api/manga/") ||
     pathname.startsWith("/api/hianime/") ||
     pathname.startsWith("/api/feedback/") ||

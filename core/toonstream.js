@@ -130,8 +130,11 @@ function absolute(url) {
   return u;
 }
 
+// Search rows link to either /series/<slug> or /movies/<slug>; the old
+// series-only pattern turned every movie hit into a slug like
+// "/movies/foo" that no detail page could resolve.
 const slugFromHref = (href) => {
-  const m = /\/series\/([^/?#]+)\/?/i.exec(String(href || ""));
+  const m = /^\/?(?:series|movies)\/([^/?#]+)\/?/i.exec(String(href || "").trim());
   return m ? m[1].toLowerCase() : "";
 };
 
@@ -146,7 +149,11 @@ export async function searchToonstream(query) {
   const q = String(query || "").trim();
   if (!q) return [];
   return cached(`toon:search:${q.toLowerCase()}`, TTL_PAGE, async () => {
-    const raw = await fetchPage(`${SITE}/search/all?q=${encodeURIComponent(q)}`, { minLength: 20 });
+    // Search is the latency-critical path and the site is DNS-sinkholed on
+    // many ISPs, so the direct attempt gets a short leash before the reader
+    // proxy answers: a full 12s direct timeout made every cold search take
+    // 12s+ and the Hindi search endpoint's own cap then dropped its rows.
+    const raw = await fetchPage(`${SITE}/search/all?q=${encodeURIComponent(q)}`, { timeout: 4000, minLength: 20 });
     const jsonText = (() => {
       const trimmed = raw.trim();
       if (trimmed.startsWith("{")) return trimmed;
@@ -163,7 +170,7 @@ export async function searchToonstream(query) {
     return rows
       .map((row) => ({
         title: decodeEntities(row?.title || ""),
-        slug: slugFromHref(row?.url) || String(row?.url || "").replace(/^\/?series\//i, "").replace(/\/$/, ""),
+        slug: slugFromHref(row?.url),
         poster: "",
         type: String(row?.type || ""),
       }))
@@ -173,43 +180,83 @@ export async function searchToonstream(query) {
 
 /**
  * One season of a series: the episode list plus every season the page links.
- * Returns { episodes: [{ episode, season, title, image }], seasons: [n...] }.
+ * Returns { episodes: [{ episode, season, title, image, url }], seasons: [n...],
+ * title, poster }.
+ *
+ * Episode lists live on the SERIES page (and on its per-season fragment), not
+ * on a constructed /episode/<slug>-SxE/ URL. Series slugs carry a suffix the
+ * episode URLs drop — "naruto-shippuden-hindi-dub" lists episodes as
+ * /episode/naruto-shippuden-1x1/ — so the old constructed URL answered 404 and
+ * every ToonStream title came back with no episodes at all. Each row's own
+ * href is the only reliable episode address, so it is parsed and kept.
  */
 export async function fetchToonstreamEpisodes(slug, season = 1) {
   const clean = String(slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
   const se = Math.max(1, Number(season) || 1);
   if (!clean) return null;
   return cached(`toon:eps:${clean}:${se}`, TTL_PAGE, async () => {
-    const html = await fetchPage(`${SITE}/episode/${clean}-${se}x1/`);
-    const region = (() => {
-      const start = html.search(/id="episode_by_temp"/i);
-      if (start < 0) return "";
-      const end = html.indexOf("</ul>", start);
-      return html.slice(start, end > 0 ? end : start + 60000);
-    })();
+    // The series page carries the season buttons and one season's episodes;
+    // /series/<slug>/season/<n> is the fragment the page itself loads for the
+    // other seasons (always fetched with that XHR header).
+    const fetchList = async (url) => {
+      const html = await fetchPage(url, { minLength: 400 });
+      return { html, region: episodeRegion(html) };
+    };
+    let html = "";
+    let region = "";
+    if (se === 1) {
+      ({ html, region } = await fetchList(`${SITE}/series/${clean}/`));
+    } else {
+      try {
+        ({ html, region } = await fetchList(`${SITE}/series/${clean}/season/${se}`));
+      } catch {
+        ({ html, region } = await fetchList(`${SITE}/series/${clean}/`));
+      }
+    }
 
     const episodes = [];
     for (const chunk of region.split(/<li[\s>]/i).slice(1)) {
-      const numRaw = decodeEntities((chunk.match(/class="[^"]*num-epi[^"]*"[^>]*>([\s\S]*?)</i) || [])[1] || "");
-      const code = (numRaw.match(/(\d{1,2})\s*x\s*(\d{1,4})/i) || [])[0];
+      const code = /class="[^"]*num-epi[^"]*"[^>]*>\s*(\d{1,2})\s*x\s*(\d{1,4})/i.exec(chunk);
       if (!code) continue;
-      const [, sNum, eNum] = /(\d{1,2})\s*x\s*(\d{1,4})/i.exec(code);
-      const title = decodeEntities((chunk.match(/class="[^"]*entry-title[^"]*"[^>]*>([\s\S]*?)<\/h2>/i) || [])[1] || "");
+      const sNum = Number(code[1]);
+      const eNum = Number(code[2]);
+      if (sNum !== se) continue;
+      const rawTitle = (chunk.match(/class="[^"]*entry-title[^"]*"[^>]*>([\s\S]*?)<\/(?:h\d|span|div|p)>/i) || [])[1] || "";
       const imgTag = (chunk.match(/<img[^>]*>/i) || [])[0] || "";
       const image = absolute((imgTag.match(/(?:data-src|data-lazy-src|data-original|src)="([^"]+)"/i) || [])[1] || "");
+      const href = (chunk.match(/href="(\/episode\/[^"]+)"/i) || [])[1] || "";
       episodes.push({
-        season: Number(sNum),
-        episode: Number(eNum),
-        title: title || `Episode ${eNum}`,
+        season: sNum,
+        episode: eNum,
+        title: decodeEntities(rawTitle) || `Episode ${eNum}`,
         image,
+        url: absolute(href),
       });
     }
+    episodes.sort((a, b) => a.episode - b.episode);
 
     const seasons = new Set();
     for (const m of html.matchAll(/data-season="(\d{1,2})"/gi)) seasons.add(Number(m[1]));
     if (!seasons.size) seasons.add(se);
-    return { episodes, seasons: [...seasons].sort((a, b) => a - b) };
+
+    // Series name for a detail panel that has no search row to borrow from.
+    const rawTitle = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "";
+    const title = decodeEntities(rawTitle).replace(/\s*[-–|]\s*ToonStream\s*$/i, "").replace(/\s+Series\s*$/i, "").trim();
+
+    return {
+      episodes,
+      seasons: [...seasons].sort((a, b) => a - b),
+      title,
+      poster: episodes[0]?.image || "",
+    };
   });
+}
+
+function episodeRegion(html) {
+  const start = html.search(/id="episode_by_temp"/i);
+  if (start < 0) return "";
+  const end = html.indexOf("</ul>", start);
+  return html.slice(start, end > 0 ? end : start + 200000);
 }
 
 /** Embed servers for one episode: [{ server, embedUrl }]. */
@@ -219,7 +266,13 @@ export async function fetchToonstreamStreams(slug, season = 1, episode = 1) {
   const ep = Math.max(1, Number(episode) || 1);
   if (!clean) return [];
   return cached(`toon:stream:${clean}:${se}:${ep}`, TTL_STREAM, async () => {
-    const html = await fetchPage(`${SITE}/episode/${clean}-${se}x${ep}/`);
+    // The episode's own link is authoritative (series slugs and episode slugs
+    // differ); the constructed URL stays as the fallback for the simple slugs
+    // where both shapes are the same.
+    const list = await fetchToonstreamEpisodes(clean, se).catch(() => null);
+    const row = (list?.episodes || []).find((e) => e.episode === ep);
+    const pageUrl = row?.url || `${SITE}/episode/${clean}-${se}x${ep}/`;
+    const html = await fetchPage(pageUrl);
     const start = html.search(/id="aa-options"/i);
     if (start < 0) return [];
     const region = html.slice(start, start + 40000);
@@ -261,7 +314,30 @@ async function probeEmbed(url) {
     const hasVideoTag = /<video[\s>]/i.test(html);
     const hasPlayer = /(jwplayer|hls\.js|videojs|<iframe|sources\s*:|["']file["']\s*:|\.m3u8|\.mp4)/i.test(html);
     if (!hasVideoTag && !hasPlayer) return { ok: false, reason: "no player found" };
-    return { ok: true, hasVideoTag };
+
+    // Many of these hosts (rubystm and friends) build a jwplayer/videojs
+    // instance from a direct file they hide in the page's own script. Pulling
+    // that file out lets the site's own player (hls.js / <video>) play the
+    // episode instead of framing someone else's player page — which is what a
+    // viewer asking for "our player" actually sees today.
+    const files = [];
+    const seenFile = new Set();
+    const pushFile = (raw) => {
+      const u = decodeEntities(String(raw || "")).trim().replace(/\\\//g, "/");
+      if (!/^https?:\/\//i.test(u)) return;
+      const kind = /\.m3u8(\?|#|$)/i.test(u) ? "hls" : (/\.mp4(\?|#|$)/i.test(u) ? "mp4" : "");
+      if (!kind) return;
+      const key = u.split("#")[0];
+      if (seenFile.has(key)) return;
+      seenFile.add(key);
+      files.push({ url: key, kind });
+    };
+    for (const m of html.matchAll(/["']file["']\s*:\s*["']([^"']+)["']/gi)) pushFile(m[1]);
+    for (const m of html.matchAll(/["']source(?:s)?["']?\s*:\s*["']([^"']+)["']/gi)) pushFile(m[1]);
+    for (const m of html.matchAll(/https?:\/\/[^"'\s<>\\]+\.m3u8[^"'\s<>\\]*/gi)) pushFile(m[0]);
+    for (const m of html.matchAll(/https?:\/\/[^"'\s<>\\]+\.mp4[^"'\s<>\\]*/gi)) pushFile(m[0]);
+
+    return { ok: true, hasVideoTag, files };
   } catch {
     return { ok: false, reason: "unreachable" };
   }
@@ -288,16 +364,18 @@ export async function fetchBestToonstreamServer(slug, season = 1, episode = 1) {
     const rank = (entry) => (entry.probe.ok ? (entry.probe.hasVideoTag ? 2 : 1) : 0);
     probed.sort((a, b) => rank(b) - rank(a));
     return { ordered: probed, working: probed.filter((p) => p.probe.ok).length };
-  });
-
-  const ordered = outcome?.ordered?.length ? outcome.ordered : servers.map((s) => ({ ...s }));
-  const best = ordered[0]?.probe?.ok ? ordered[0] : null;
-  const list = best ? ordered : servers.map((s) => ({ ...s }));
-  return {
-    primary: list[0] || null,
-    alternates: list.slice(1),
-    probed: outcome?.working ?? 0,
-  };
+  });    const ordered = outcome?.ordered?.length ? outcome.ordered : servers.map((s) => ({ ...s }));
+    const best = ordered[0]?.probe?.ok ? ordered[0] : null;
+    const list = best ? ordered : servers.map((s) => ({ ...s }));
+    const head = list[0] || null;
+    if (head && Array.isArray(head.probe?.files) && head.probe.files.length) {
+      head.direct = head.probe.files[0];
+    }
+    return {
+      primary: head,
+      alternates: list.slice(1),
+      probed: outcome?.working ?? 0,
+    };
 }
 
 /**

@@ -6,6 +6,12 @@
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { sha512 } from "@noble/hashes/sha512.js";
+// MD5 is not a Workers-native digest, but the MovieBox mobile client signs
+// every request with HMAC-MD5 (and md5(reversed(timestamp)) for its client
+// token). Without it the moviebox API calls threw "Unsupported hash
+// algorithm: md5" on the Worker, so MovieBox search returned nothing there
+// while working on Node.
+import { md5 } from "@noble/hashes/legacy.js";
 import { cbc } from "@noble/ciphers/aes.js";
 
 const ENCODER = new TextEncoder();
@@ -36,7 +42,7 @@ function fromB64u(s) {
   return out;
 }
 
-const HASHES = { sha256, sha512 };
+const HASHES = { sha256, sha512, md5 };
 
 export function createHash(alg) {
   const hash = HASHES[String(alg).toLowerCase()];

@@ -27,6 +27,11 @@ const swPath = path.join(rootDir, "public", "sw.js");
 // for this project (only the serverless function answers), so /favicon.png,
 // /logo-64.png and friends would otherwise fall through to the HTML catch-all.
 const pngAssets = ["favicon.png", "logo-64.png", "logo-128.png", "logo.png"];
+// Animated assets are bundled for the same reason: the Sites Worker has no
+// static public/ directory, so /pikachu-buffer.gif fell through to the HTML
+// catch-all and browsers refused it (text/html where an image was expected),
+// which is why the buffering Pikachu never appeared on the deployed site.
+const gifAssets = ["pikachu-buffer.gif"];
 const outputPath = path.join(rootDir, "core", "index-html.js");
 
 try {
@@ -75,6 +80,14 @@ try {
       : null;
   }
 
+  const gifB64 = {};
+  for (const name of gifAssets) {
+    const file = path.join(rootDir, "public", name);
+    gifB64[name] = fs.existsSync(file)
+      ? fs.readFileSync(file).toString("base64")
+      : null;
+  }
+
   const content = `// Auto-generated bundle of frontend assets for Vercel and Serverless deployments
 export const INDEX_HTML_B64 = "${htmlB64}";
 export const MANGA_HTML_B64 = "${mangaB64}";
@@ -82,6 +95,7 @@ export const AD_HTML_B64 = "${adB64}";
 export const LOGO_SVG_B64 = "${logoB64}";
 export const SW_JS_B64 = "${swB64}";
 export const PNG_ASSETS_B64 = ${JSON.stringify(pngB64, null, 2)};
+export const GIF_ASSETS_B64 = ${JSON.stringify(gifB64, null, 2)};
 
 let _html = null;
 let _manga = null;
@@ -89,6 +103,7 @@ let _ad = null;
 let _logo = null;
 let _sw = null;
 let _png = null;
+let _gif = null;
 
 export function getIndexHtml() {
   if (_html === null) _html = Buffer.from(INDEX_HTML_B64, "base64").toString("utf8");
@@ -122,6 +137,15 @@ export function getPngAsset(name) {
     _png.set(name, b64 ? Buffer.from(b64, "base64") : null);
   }
   return _png.get(name);
+}
+
+export function getGifAsset(name) {
+  if (_gif === null) _gif = new Map();
+  if (!_gif.has(name)) {
+    const b64 = GIF_ASSETS_B64[name];
+    _gif.set(name, b64 ? Buffer.from(b64, "base64") : null);
+  }
+  return _gif.get(name);
 }
 `
 

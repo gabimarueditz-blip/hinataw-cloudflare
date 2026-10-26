@@ -47,20 +47,33 @@ export function deobfuscateZokoConfig(blob) {
 }
 
 // Fetch a Zoko embed shell and return its decoded player config, or throw.
+// Two short attempts: the provider's edge answers some datacenter fetches
+// with a tiny challenge shell (HTTP 200, no window.__P) and the plain shell
+// on the retry a beat later — a single attempt used to lose the direct stream
+// on roughly every other deployment, stranding players on the ad-laden embed.
 export async function extractZoko(embedUrl, { userAgent = DEFAULT_UA, timeoutMs = 4000 } = {}) {
-  const res = await fetch(String(embedUrl), {
-    headers: { "User-Agent": userAgent, Referer: `${ZOKO_ORIGIN}/` },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) throw new Error(`Zoko embed HTTP ${res.status}`);
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 700));
+    try {
+      const res = await fetch(String(embedUrl), {
+        headers: { "User-Agent": userAgent, Referer: `${ZOKO_ORIGIN}/` },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) throw new Error(`Zoko embed HTTP ${res.status}`);
 
-  const html = await res.text();
-  const match = html.match(/window\.__P="([^"]+)"/);
-  if (!match) throw new Error("Zoko player config not found");
+      const html = await res.text();
+      const match = html.match(/window\.__P="([^"]+)"/);
+      if (!match) throw new Error("Zoko player config not found");
 
-  const config = deobfuscateZokoConfig(match[1]);
-  if (!config || !config.src) throw new Error("Zoko player config has no stream source");
-  return config;
+      const config = deobfuscateZokoConfig(match[1]);
+      if (!config || !config.src) throw new Error("Zoko player config has no stream source");
+      return config;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("Zoko embed fetch failed");
 }
 
 // Turn a decoded config into the fields our stream list expects: the master

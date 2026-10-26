@@ -506,7 +506,7 @@ async function searchAnime(query) {
 	try {
 		const gql = `
       query ($search: String) {
-        Page(page: 1, perPage: 16) {
+        Page(page: 1, perPage: 50) {
           media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
             id
             title { english romaji native }
