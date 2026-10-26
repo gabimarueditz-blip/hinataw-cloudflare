@@ -8642,6 +8642,454 @@ let heroSwapTimer = null;
     }
     window.openMuxDetail = openMuxDetail;
 
+    const categoryCarousels = new Map();
+
+    // Category keys are kebab-case ('manga-popular') but the DOM ids are
+    // camelCase prefixed with 'Carousel' ('mangaPopularCarouselTrack').
+    // Without this map every lookup returned null and every section stayed
+    // empty while the renderers silently no-oped.
+    const CATEGORY_DOM_PREFIX = {
+      'latest': 'latest',
+      'upcoming': 'upcoming',
+      'manga-popular': 'mangaPopular',
+      'manga-latest': 'mangaLatest',
+    };
+
+    function categoryDomPrefix(cat) {
+      return CATEGORY_DOM_PREFIX[cat] || cat;
+    }
+
+    function getCategoryCarousel(id) {
+      if (!categoryCarousels.has(id)) {
+        const prefix = categoryDomPrefix(id);
+        categoryCarousels.set(id, {
+          id,
+          trackId: prefix + 'CarouselTrack',
+          viewportId: prefix + 'CarouselViewport',
+          dotsWrapId: prefix + 'CarouselDotsWrap',
+          counterId: prefix + 'CarouselCounter',
+          headingId: prefix + 'CarouselHeading',
+          browseMoreId: prefix + 'CarouselBrowseMore',
+          data: [],
+          index: 0,
+          timer: null,
+          // Rows stay where the viewer put them: the owner asked for no
+          // auto-scrolling carousels anywhere on the page.
+          autoplay: false,
+        });
+      }
+      return categoryCarousels.get(id);
+    }
+
+    function updateCarouselHeading(cat, label) {
+      const heading = document.getElementById(getCategoryCarousel(cat).headingId);
+      if (heading) heading.textContent = label;
+    }
+
+    // (getVisibleCardCount lives in the trending-carousel block above — the
+    //  duplicated declaration here was shadowing it.)
+
+    // Each category row measures its own viewport, so the max index matches what
+    // the row can really show (and the dot count/counter follow suit).
+    function getCategoryVisibleCardCount(carousel) {
+      const measured = visibleCardsIn(
+        document.getElementById(carousel.viewportId),
+        document.querySelector(`#${carousel.trackId} > *`),
+        20
+      );
+      return measured || getVisibleCardCount();
+    }
+
+    function getCategoryMaxIndex(carousel) {
+      const visible = getCategoryVisibleCardCount(carousel);
+      // Count real slides from the track: a row also carries the trailing
+      // "see all" tile, which is deliberately not part of carousel.data.
+      const track = document.getElementById(carousel.trackId);
+      const total = (track && track.children.length) || carousel.data.length;
+      return Math.max(0, total - visible);
+    }
+
+    function updateCategoryCarouselPosition(carousel) {
+      const track = document.getElementById(carousel.trackId);
+      if (!track || !carousel.data.length) return;
+
+      const maxIdx = getCategoryMaxIndex(carousel);
+      if (carousel.index > maxIdx) carousel.index = maxIdx;
+      if (carousel.index < 0) carousel.index = 0;
+
+      const card = track.querySelector('.category-slide-card') || track.firstElementChild;
+      const gap = 20;
+      const cardWidth = card ? card.offsetWidth : 260;
+      // Keep the track flush with the last card instead of scrolling into the
+      // empty area past it (that gap was the visible "dead space").
+      const visible = getCategoryVisibleCardCount(carousel);
+      let moveAmount = carousel.index * (cardWidth + gap);
+      if (carousel.index >= maxIdx) {
+        // Last slide: flush the track's end with the viewport so the row never
+        // shows a blank strip past the final card.
+        const viewport = document.getElementById(carousel.viewportId);
+        const flush = Math.max(0, track.scrollWidth - (viewport ? viewport.clientWidth : 0));
+        moveAmount = flush || Math.min(moveAmount, Math.max(0, carousel.data.length - visible) * (cardWidth + gap));
+      }
+      track.style.transform = `translateX(-${moveAmount}px)`;
+
+      renderCategoryCarouselDots(carousel);
+      updateCategoryCarouselCounter(carousel);
+      updateCategoryBrowseMore(carousel, maxIdx);
+    }
+
+    // The full listing used to be reachable only via the trailing "See all" tile,
+    // i.e. only after scrolling a whole row. Show "Browse more" under the row
+    // once 5 slides have been scrolled — or at once when the row is too short to
+    // offer 5, so the option is never unreachable.
+    function updateCategoryBrowseMore(carousel, maxIdx) {
+      const btn = document.getElementById(carousel.browseMoreId);
+      if (!btn) return;
+      btn.style.display = (maxIdx > 0 && carousel.index >= Math.min(5, maxIdx)) ? 'block' : 'none';
+    }
+
+    function updateCategoryCarouselCounter(carousel) {
+      const counter = document.getElementById(carousel.counterId);
+      if (!counter) return;
+      const maxIdx = getCategoryMaxIndex(carousel);
+      const total = Math.max(1, maxIdx + 1 || carousel.data.length);
+      const current = Math.min(carousel.index + 1, total);
+      counter.textContent = `${current} / ${total}`;
+    }
+
+    // Dots are capped. A row of 130+ slides used to render 130 dots, which blew
+    // the arrows strip up to ~2000px wide and squeezed the card viewport to 0px.
+    // Above the cap the dots map proportionally onto the slide range.
+    const MAX_CAROUSEL_DOTS = 10;
+
+    function carouselDotsHtml(total, maxIdx, currentIndex, onclickFor) {
+      const dots = Math.min(total, MAX_CAROUSEL_DOTS);
+      const activeDot = activeDotIndex(dots, maxIdx, currentIndex);
+      let html = '';
+      for (let i = 0; i < dots; i++) {
+        const slide = dots === total || dots < 2 ? i : Math.round(i * maxIdx / (dots - 1));
+        html += `<button class="carousel-dot${i === activeDot ? ' active' : ''}" type="button" aria-label="Go to slide ${slide + 1}" onclick="${onclickFor(slide)}"></button>`;
+      }
+      return html;
+    }
+
+    function activeDotIndex(dots, maxIdx, currentIndex) {
+      if (dots < 2 || maxIdx < 1) return 0;
+      return Math.max(0, Math.min(dots - 1, Math.round(currentIndex * (dots - 1) / maxIdx)));
+    }
+
+    function jumpCategorySlide(cat, index) {
+      const carousel = getCategoryCarousel(cat);
+      carousel.index = Math.max(0, Math.min(index, getCategoryMaxIndex(carousel)));
+      updateCategoryCarouselPosition(carousel);
+    }
+
+    function renderCategoryCarouselDots(carousel) {
+      const wrap = document.getElementById(carousel.dotsWrapId);
+      if (!wrap) return;
+      const maxIdx = getCategoryMaxIndex(carousel);
+      const total = maxIdx + 1;
+      const signature = `${total}:${maxIdx}`;
+
+      if (wrap.dataset.dotSignature !== signature) {
+        wrap.dataset.dotSignature = signature;
+        wrap.innerHTML = carouselDotsHtml(total, maxIdx, carousel.index, (slide) => `jumpCategorySlide('${carousel.id}', ${slide})`);
+      }
+      const active = activeDotIndex(wrap.children.length, maxIdx, carousel.index);
+      [...wrap.children].forEach((dot, i) => dot.classList.toggle('active', i === active));
+    }
+
+    function jumpTrendingSlideByDot(index) {
+      jumpTrendingSlide(Math.max(0, Math.min(index, getMaxCarouselIndex())));
+    }
+
+    function startCategoryCarouselAutoplay(carousel) {
+      stopCategoryCarouselAutoplay(carousel);
+      if (!carousel.autoplay) return;
+      carousel.timer = setInterval(() => {
+        slideCategoryCarousel(carousel.id, 'next', true);
+      }, 4200);
+    }
+
+    function stopCategoryCarouselAutoplay(carousel) {
+      if (carousel.timer) {
+        clearInterval(carousel.timer);
+        carousel.timer = null;
+      }
+    }
+
+    function toggleCategoryCarouselAutoplay(carousel) {
+      carousel.autoplay = !carousel.autoplay;
+      if (carousel.autoplay) {
+        startCategoryCarouselAutoplay(carousel);
+      } else {
+        stopCategoryCarouselAutoplay(carousel);
+      }
+    }
+
+    function slideCategoryCarousel(cat, dir, fromTimer) {
+      // Trending hero carousel keeps using the legacy engine.
+      if (cat === 'trending') {
+        slideTrendingCarousel(dir);
+        return;
+      }
+
+      const carousel = getCategoryCarousel(cat);
+      if (!carousel.data.length) return;
+      const maxIdx = getCategoryMaxIndex(carousel);
+
+      if (dir === 'next') {
+        carousel.index = carousel.index >= maxIdx ? 0 : carousel.index + 1;
+      } else {
+        carousel.index = carousel.index <= 0 ? maxIdx : carousel.index - 1;
+      }
+      updateCategoryCarouselPosition(carousel);
+    }
+
+    function setupCategoryCarouselGestures(carousel) {
+      const viewport = document.getElementById(carousel.viewportId);
+      if (!viewport) return;
+
+      viewport.addEventListener('mouseenter', () => stopCategoryCarouselAutoplay(carousel));
+      viewport.addEventListener('mouseleave', () => {
+        if (carousel.autoplay) startCategoryCarouselAutoplay(carousel);
+      });
+
+      viewport.addEventListener('touchstart', (e) => {
+        carouselTouchStartX = e.changedTouches[0].screenX;
+        stopCategoryCarouselAutoplay(carousel);
+      }, { passive: true });
+
+      viewport.addEventListener('touchend', (e) => {
+        carouselTouchEndX = e.changedTouches[0].screenX;
+        const diff = carouselTouchStartX - carouselTouchEndX;
+        const absDiff = Math.abs(diff);
+        if (absDiff > 30) {
+          if (diff > 0) slideCategoryCarousel(carousel.id, 'next');
+          else slideCategoryCarousel(carousel.id, 'prev');
+        } else {
+          const track = document.getElementById(carousel.trackId);
+          if (!track) return;
+          const rect = track.getBoundingClientRect();
+          const x = e.changedTouches[0].clientX - rect.left;
+          const cardWidth = track.firstElementChild ? track.firstElementChild.offsetWidth : 260;
+          const gap = 20;
+          const idx = Math.round(x / (cardWidth + gap));
+          const maxIdx = getCategoryMaxIndex(carousel);
+          if (idx >= 0 && idx <= maxIdx) {
+            carousel.index = idx;
+            updateCategoryCarouselPosition(carousel);
+          }
+        }
+        if (carousel.autoplay) startCategoryCarouselAutoplay(carousel);
+      }, { passive: true });
+    }
+
+    // Every category keeps its full item list so a row can open "see all" for
+    // exactly the titles that fall under that same category.
+    const categoryItems = new Map();
+
+    // Trailing tile rendered after the first cards of a longer row.
+    function seeAllTileHtml(cat, count) {
+      return `
+        <div class="category-slide-card see-all-card" onclick="showCategoryAll('${cat}')" data-title="See all ${count} titles" title="See all ${count} titles">
+          <div class="see-all-inner">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+            <span class="see-all-label">See all</span>
+            <span class="see-all-count">${count} titles</span>
+          </div>
+        </div>
+      `;
+    }
+
+    // Grid card that understands both catalog shapes (HiAnime & curated feeds),
+    // used by the per-category "see all" listing.
+    function gridCardHtml(item) {
+      const title = (item.title && (item.title.english || item.title.romaji)) || item.title || 'Anime';
+      const cover = item.image || (item.coverImage && (item.coverImage.extraLarge || item.coverImage.large)) || item.poster || '';
+      const rating = item.rating || (item.averageScore ? (item.averageScore / 10).toFixed(1) : '');
+      const year = item.seasonYear || item.year || '';
+      // Owner-uploaded (Mux) cards open in the Mux player; everything else
+      // opens through the HiAnime detail/player.
+      const click = item.muxId
+        ? `openMuxDetail('${String(item.muxId).replace(/[^a-zA-Z0-9_-]/g, '')}')`
+        : `openPlayerById(${JSON.stringify(item.id)})`;
+      const isMovie = String(item.type || '').toLowerCase() === 'movie';
+      const typeLabel = item.type ? (isMovie ? 'Movie' : 'Series') : (item.format || 'TV');
+
+      return `
+        <div class="hianime-card" onclick="${click}" data-title="${escapeHtml(title)}">
+          <div class="hianime-poster-wrap">
+            <img src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+            <div class="hianime-badges-over">
+              ${rating ? `<span class="badge-mic"><span>★ ${escapeHtml(String(rating))}</span></span>` : ''}
+            </div>
+          </div>
+          <div class="hianime-card-meta">
+            <h3 class="hianime-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
+            <div class="hianime-card-sub">
+              <span>${escapeHtml(typeLabel)}</span>
+              ${year ? `<span class="hianime-dot">•</span><span>${escapeHtml(String(year))}</span>` : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // Full listing for one category, reusing the results grid + banner.
+    function showCategoryAll(cat) {
+      const items = categoryItems.get(cat) || [];
+      if (!items.length) return;
+      const carousel = getCategoryCarousel(cat);
+      const headingEl = document.getElementById(carousel.headingId);
+      // The trending row's title lives in the hero heading, not a carousel one.
+      const heading = (headingEl && headingEl.textContent.trim())
+        || (cat === 'trending' ? 'Trending' : 'Category');
+
+      const dView = document.getElementById('discoverView');
+      if (dView) dView.style.display = 'none';
+      const srb = document.getElementById('searchResultsBanner');
+      if (srb) srb.classList.add('active');
+      const srs = document.getElementById('searchResultsSection');
+      if (srs) srs.style.display = 'block';
+      const srt = document.getElementById('searchResultsTitle');
+      if (srt) srt.textContent = `${heading} — all ${items.length} titles`;
+      const src = document.getElementById('searchResultsCount');
+      if (src) src.textContent = `${items.length} titles in this category`;
+
+      const grid = document.getElementById('searchGrid');
+      if (grid) grid.innerHTML = items.map(gridCardHtml).join('');
+      if (srs) srs.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // Creates a row's "Browse more" button under its controls, once.
+    function ensureCategoryBrowseMore(carousel) {
+      if (document.getElementById(carousel.browseMoreId)) return;
+      const viewport = document.getElementById(carousel.viewportId);
+      const wrap = viewport && viewport.parentElement;
+      if (!wrap || !wrap.parentElement) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = carousel.browseMoreId;
+      btn.className = 'carousel-browse-more';
+      btn.textContent = 'Browse more';
+      btn.addEventListener('click', () => showCategoryAll(carousel.id));
+      wrap.parentElement.insertBefore(btn, wrap.nextSibling);
+    }
+
+    /** Initialize one of the stacked category carousels. `list` is the array of
+     *  anime items for that section; the section's track is populated from them
+     *  and the section is shown (category carousels are never gated by tabs). */
+    function initCategoryCarousel(cat, list) {
+      const carousel = getCategoryCarousel(cat);
+      const items = Array.isArray(list) ? list : [];
+      carousel.data = items;
+      carousel.index = 0;
+      categoryItems.set(cat, items);
+
+      // Populate the section's track using the existing section renderers so the
+      // cards keep their original markup/interaction (watch buttons, etc.).
+      renderCategoryCarouselTrack(cat, items);
+      ensureCategoryBrowseMore(carousel);
+
+      updateCategoryCarouselPosition(carousel);
+      startCategoryCarouselAutoplay(carousel);
+      setupCategoryCarouselGestures(carousel);
+      installCategoryResizeHandler();
+    }
+
+    // Card counts are measured from the DOM, so a resize must re-measure every
+    // row; otherwise the rows keep the previous viewport's pagination.
+    let categoryResizeBound = false;
+    function installCategoryResizeHandler() {
+      if (categoryResizeBound) return;
+      categoryResizeBound = true;
+      window.addEventListener('resize', () => {
+        for (const carousel of categoryCarousels.values()) {
+          if (carousel.data.length) updateCategoryCarouselPosition(carousel);
+        }
+      });
+    }
+
+    function renderCategoryCarouselTrack(cat, items) {
+      const track = document.getElementById(getCategoryCarousel(cat).trackId);
+      if (!track) return;
+
+      if (!items || !items.length) {
+        track.innerHTML = '<div class="carousel-empty-state" style="padding: 24px; color: var(--text-faint); font-size: 13px;">No titles available right now.</div>';
+        return;
+      }
+
+      // Manga rows keep their own card shape: no watchlist/star controls, a
+      // chapter pill instead of a rating, and clicks open the manga detail.
+      if (cat === 'manga-popular' || cat === 'manga-latest') {
+        track.innerHTML = items
+          .map((m, index) => mangaSlideCardHtml(m, index))
+          .join('') + (items.length > 5 ? mangaSeeAllTileHtml(cat, items.length) : '');
+        return;
+      }
+
+      const slideCards = items.map((anime, index) => {
+        const title = (anime.title && (anime.title.english || anime.title.romaji)) || anime.title || 'Anime';
+        // `image` is the poster field for owner-uploaded (Mux) cards.
+        const cover = anime.image || (anime.coverImage && (anime.coverImage.extraLarge || anime.coverImage.large)) || anime.poster || anime.coverImage || 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx21-ELSYx3yMPcKM.jpg';
+        const rating = anime.rating || anime.averageScore || '';
+        const rank = (anime.rank != null ? anime.rank : index + 1);
+        const rankStr = rank < 10 ? '0' + rank : String(rank);
+        const subtitle = (anime.title && anime.title.romaji) || '';
+        const year = anime.seasonYear || anime.year || '';
+        const type = anime.type || anime.format || '';
+
+        const tags = [];
+        if (rating) tags.push({ label: String(rating), highlight: !!rating });
+        if (type) tags.push({ label: type });
+        if (year) tags.push({ label: year });
+
+        // Owner-uploaded (Mux) cards open in the Mux player; every other
+        // carousel card opens through the HiAnime detail/player.
+        const onclickAttr = anime.muxId
+          ? `onclick="openMuxDetail('${String(anime.muxId).replace(/[^a-zA-Z0-9_-]/g, '')}')"`
+          : `onclick="openPlayerById(${JSON.stringify(anime.id)})"`;
+
+        return `
+          <div class="category-slide-card" ${onclickAttr} data-title="${escapeHtml(title)}">
+            <div class="slide-poster-wrap">
+              <img class="slide-poster-img" src="${escapeHtml(cover)}" referrerpolicy="no-referrer" onerror="handleImgError(this)" alt="${escapeHtml(title)}" loading="lazy"/>
+              <div class="slide-overlay"></div>
+              <span class="trending-rank-badge">${rankStr}</span>
+              ${rating ? `<span class="trending-score-pill">⭐ ${escapeHtml(rating)}</span>` : ''}
+              <div class="slide-play-action">
+                <button class="slide-play-btn" type="button">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="slide-content-wrap">
+              <div class="slide-title-group">
+                <div class="slide-anime-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+                ${subtitle ? `<div class="slide-anime-romaji">${escapeHtml(subtitle)}</div>` : ''}
+              </div>
+              <div class="slide-tags-row">
+                ${tags.map(t => `<span class="slide-tag${t.highlight ? ' highlight' : ''}">${escapeHtml(t.label)}</span>`).join('')}
+              </div>
+              <div class="slide-footer-row">
+                <button class="slide-watch-now-btn" type="button">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  Watch Now
+                </button>
+                <button class="slide-watchlist-btn" type="button" title="Add to Watchlist">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      // Longer rows end with a tile that opens every title of this category.
+      track.innerHTML = slideCards + (items.length > 5 ? seeAllTileHtml(cat, items.length) : '');
+    }
+
     function renderTopUpcoming(list) {
       const container = document.getElementById('topUpcomingGrid');
       if (!container) return;
